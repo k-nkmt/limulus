@@ -1,0 +1,17 @@
+name: Feature Request
+description: Template for proposing a new feature or improvement
+title: "[Feature] "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for your suggestion. Clearly describing your goal and use case helps us evaluate the proposal more effectively.
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+    validations:
+      required: true

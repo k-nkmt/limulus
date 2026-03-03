@@ -1,0 +1,63 @@
+[project]
+name = "limulus"
+version = "0.1.0"
+description = "DataStep for Your Workspace"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "PolyForm Noncommercial License 1.0.0" }
+license-files = ["LICENSE.txt"]
+authors = [
+  { name = "Ken Nakamatsu", email = "ken-nakamatsu@knworx.com" },
+]
+
+keywords = ["datastep", "dataframe", "arrow", "polars"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: Other/Proprietary License",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Rust",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+    "lark>=1.1",
+    "pyarrow>=15.0.0",
+    "polars>=0.20",
+]
+
+[project.urls]
+Repository = "https://github.com/k-nkmt/limulus"
+Documentation = "https://k-nkmt.github.io/limulus/"
+
+[project.optional-dependencies]
+pandas = ["pandas>=2.2"]
+
+[dependency-groups]
+dev = [
+    "maturin>=1.12.2",
+    "pytest>=8.3.4",
+    "polars>=0.20",
+    "pandas>=2.2",
+    "sphinx>=7.0",
+    "myst-parser>=3.0",
+    "myst-nb>=1.0",
+    "sphinx-autodoc-typehints>=2.0",
+    "sphinx-book-theme>=1.1.4",
+    "notebook>=7.5.3",
+    "matplotlib>=3.8",
+]
+
+[build-system]
+requires = ["maturin>=1.12.2"]
+build-backend = "maturin"
+
+[tool.maturin]
+manifest-path = "native/limulus_native/Cargo.toml"
+module-name = "limulus_native"
+python-packages = ["limulus"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

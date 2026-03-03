@@ -1,0 +1,91 @@
+// limulus DataStep grammar 
+
+start: statement (";" statement)* ";"?
+
+statement: data_stmt
+         | set_stmt
+         | merge_stmt
+         | if_stmt
+         | else_if_stmt
+         | else_stmt
+         | where_stmt
+         | by_stmt
+         | output_stmt
+         | drop_stmt
+         | keep_stmt
+         | delete_stmt
+         | rename_stmt
+         | retain_stmt
+         | array_stmt
+         | stop_stmt
+         | do_stmt
+         | end_stmt
+         | run_stmt
+         | sum_stmt
+         | assign_stmt
+         | skipped_stmt
+
+// --- Core statements ---
+data_stmt: data_kw dataset_ref+
+set_stmt: set_kw set_component+
+merge_stmt: /(?i)merge[^;]*/
+data_kw: /(?i)data/
+set_kw: /(?i)set/
+set_component: dataset_ref
+          | set_statement_option
+dataset_ref: dataset_name dataset_options?
+dataset_name: /[A-Za-z_][\w\.]*/
+dataset_options: "(" dataset_option+ ")"
+dataset_option: /(?i)[A-Za-z_][\w]*\s*=\s*(?:\((?:[^()]|\([^()]*\))*\)|"[^"]*"|'[^']*'|[^)\s]+(?:\s+(?![A-Za-z_][\w]*\s*=)[^)\s]+)*)/
+set_statement_option: /(?i)(indsname|end)\s*=\s*[A-Za-z_][\w\.]*/
+
+if_stmt: if_then_do_stmt
+    | if_then_stmt
+    | subset_if_stmt
+else_if_stmt: else_if_then_do_stmt
+         | else_if_then_stmt
+if_then_do_stmt: /(?i)if\b[^;]*\bthen\s+do\b[^;]*/
+if_then_stmt: /(?i)if\b[^;]*\bthen\b[^;]*/
+subset_if_stmt: /(?i)if\b(?![^;]*\bthen\b)[^;]*/
+else_if_then_do_stmt: /(?i)else\s*if\b[^;]*\bthen\s+do\b[^;]*/
+else_if_then_stmt: /(?i)else\s*if\b[^;]*\bthen\b[^;]*/
+else_stmt: /(?i)else[^;]*/
+where_stmt: /(?i)where[^;]*/
+by_stmt: /(?i)by[^;]*/
+output_stmt: /(?i)output[^;]*/
+drop_stmt: /(?i)drop[^;]*/
+keep_stmt: /(?i)keep[^;]*/
+delete_stmt: /(?i)delete/
+rename_stmt: /(?i)rename[^;]*/
+retain_stmt: /(?i)retain[^;]*/
+array_stmt: /(?i)array[^;]*/
+stop_stmt: /(?i)stop/
+do_stmt: /(?i)do/ /[^;]+/
+end_stmt: /(?i)end/
+run_stmt: /(?i)run/
+
+sum_stmt: /(?i)(?!\s*(if|else|where|data|set|merge|by|output|drop|keep|delete|rename|retain|array|stop|do|end|run|length|attrib|format|label|informat|attrib)\b)[A-Za-z_][\w\.]*\s*\+\s*[^;]+/
+assign_stmt: /(?i)(?!\s*(if|else|where|data|set|merge|by|output|drop|keep|delete|rename|retain|array|stop|do|end|run|length|attrib|format|label|informat|attrib)\b)[^;]*=[^;]*/
+
+skipped_stmt: length_stmt
+            | attrib_stmt
+            | format_stmt
+            | label_stmt
+            | informat_stmt
+            | call_stmt
+
+length_stmt: /(?i)length[^;]*/
+attrib_stmt: /(?i)attrib[^;]*/
+format_stmt: /(?i)format[^;]*/
+label_stmt: /(?i)label[^;]*/
+informat_stmt: /(?i)informat[^;]*/
+call_stmt: /(?i)call\b[^;]*/
+
+LINE_COMMENT: /\*(?!\/)[^;]*;/
+BLOCK_COMMENT: /\/\*[\s\S]*?\*\//
+
+%ignore LINE_COMMENT
+%ignore BLOCK_COMMENT
+
+%import common.WS
+%ignore WS

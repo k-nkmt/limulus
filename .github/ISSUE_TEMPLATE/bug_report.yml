@@ -1,0 +1,32 @@
+name: Bug Report
+description: Template for reporting a bug
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting a bug. Please provide as much detail as possible to help reproduce the issue.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: Briefly describe what happened.
+      placeholder: "e.g. An exception is raised for a specific WHERE clause when calling Session.submit()"
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      description: Provide the minimal code or steps needed to reproduce the issue.
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual Result
+      description: Paste any error messages or logs here.
+      render: shell
