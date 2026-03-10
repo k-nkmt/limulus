@@ -42,9 +42,6 @@ When `by` is specified together with multiple datasets, rows from all sources ar
 merge-sorted by the BY key rather than concatenated in source order.
 This matches "interleaving" semantics.
 
-> **Note:** When a `SET` statement reads from multiple datasets using both a `BY` statement and `IN=` options, per-row source tracking is required and execution automatically falls back to the Python backend. The `"auto"` backend handles this transparently.
-
-
 ```sas
 data combined;
   set sales2023 sales2024;

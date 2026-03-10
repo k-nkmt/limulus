@@ -58,5 +58,14 @@ autodoc_default_options = {
     "undoc-members": False,
     "show-inheritance": True,
 }
+autodoc_mock_imports = [
+    "pyarrow",
+    "pyarrow.compute",
+    "pyarrow.ipc",
+    "pyarrow.parquet",
+    "polars",
+    "pandas",
+    "limulus_native",
+]
 napoleon_google_docstring = True
 napoleon_numpy_docstring = False
