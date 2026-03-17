@@ -21,6 +21,9 @@ class DatasetReferenceOptionSpec:
     drop_vars: tuple[str, ...] = field(default_factory=tuple)
     where_expr: str | None = None
     rename_map: dict[str, str] = field(default_factory=dict)
+    firstobs: int | None = None
+    obs: int | None = None
+    label: str | None = None
 
 
 @dataclass(frozen=True)
@@ -43,6 +46,7 @@ class ParsedStatement:
     output_refs: tuple[DatasetReference, ...] = field(default_factory=tuple)
     statement_options: SetStatementOptionSpec = field(default_factory=SetStatementOptionSpec)
     rename_map: dict[str, str] = field(default_factory=dict)
+    label_map: dict[str, str] = field(default_factory=dict)
     if_spec: "IfStatementSpec | None" = None
     do_spec: "DoStatementSpec | None" = None
     array_spec: "ArrayStatementSpec | None" = None
@@ -103,6 +107,9 @@ def statement_to_dict(statement: ParsedStatement) -> dict[str, Any]:
                     "drop_vars": list(dataset_ref.options.drop_vars),
                     "where_expr": dataset_ref.options.where_expr,
                     "rename_map": dict(dataset_ref.options.rename_map),
+                    "firstobs": dataset_ref.options.firstobs,
+                    "obs": dataset_ref.options.obs,
+                    "label": dataset_ref.options.label,
                 },
             }
             for dataset_ref in statement.dataset_refs
@@ -116,6 +123,9 @@ def statement_to_dict(statement: ParsedStatement) -> dict[str, Any]:
                     "drop_vars": list(dataset_ref.options.drop_vars),
                     "where_expr": dataset_ref.options.where_expr,
                     "rename_map": dict(dataset_ref.options.rename_map),
+                    "firstobs": dataset_ref.options.firstobs,
+                    "obs": dataset_ref.options.obs,
+                    "label": dataset_ref.options.label,
                 },
             }
             for dataset_ref in statement.output_refs
@@ -125,6 +135,7 @@ def statement_to_dict(statement: ParsedStatement) -> dict[str, Any]:
             "end_var": statement.statement_options.end_var,
         },
         "rename_map": dict(statement.rename_map),
+        "label_map": dict(statement.label_map),
         "if_spec": (
             {
                 "condition": if_spec.condition,
@@ -198,7 +209,7 @@ class LarkParserService:
         "length_stmt": "SKIPPED",
         "attrib_stmt": "SKIPPED",
         "format_stmt": "SKIPPED",
-        "label_stmt": "SKIPPED",
+        "label_stmt": "LABEL",
         "informat_stmt": "SKIPPED",
         "call_stmt": "SKIPPED",
     }
@@ -274,6 +285,14 @@ class LarkParserService:
 
             if kind == "RENAME":
                 statement, diagnostic = self._parse_rename_statement(segment, index)
+                if diagnostic is not None:
+                    diagnostics.append(diagnostic)
+                    continue
+                statements.append(statement)
+                continue
+
+            if kind == "LABEL":
+                statement, diagnostic = self._parse_label_statement(segment, index)
                 if diagnostic is not None:
                     diagnostics.append(diagnostic)
                     continue
@@ -388,9 +407,9 @@ class LarkParserService:
                     nested_rule = str(getattr(nested_children[0], "data", ""))
                     if nested_rule in self._RULE_KIND_MAP:
                         variant_name = nested_rule
-                kind = self._RULE_KIND_MAP.get(rule_name)
+                kind = self._RULE_KIND_MAP.get(variant_name)
                 if kind is None:
-                    kind = self._RULE_KIND_MAP.get(variant_name)
+                    kind = self._RULE_KIND_MAP.get(rule_name)
                 if kind is None:
                     return [], Diagnostic(
                         code="PARSE_UNSUPPORTED_STATEMENT",
@@ -454,7 +473,7 @@ class LarkParserService:
             if option_key_match is None:
                 continue
             option_key = option_key_match.group(1)
-            if kind != "SET" and option_key in {"indsname", "end"}:
+            if option_key == "indsname" and kind != "SET":
                 return (
                     ParsedStatement(kind=kind, text=segment),
                     Diagnostic(
@@ -489,7 +508,7 @@ class LarkParserService:
                 set_option_match = re.match(r"^\s*(indsname|end|in)\s*=", token_lower)
                 if set_option_match is not None and "(" not in token:
                     option_key = set_option_match.group(1)
-                    if kind != "SET" and option_key in {"indsname", "end"}:
+                    if option_key == "indsname" and kind != "SET":
                         return (
                             ParsedStatement(kind=kind, text=segment),
                             Diagnostic(
@@ -715,6 +734,9 @@ class LarkParserService:
         drop_vars: list[str] = []
         where_expr: str | None = None
         rename_map: dict[str, str] = {}
+        firstobs: int | None = None
+        obs: int | None = None
+        label: str | None = None
         active_collect: str | None = None
 
         for token in tokens:
@@ -765,6 +787,37 @@ class LarkParserService:
                     active_collect = None
                     continue
 
+                if normalized_key == "firstobs":
+                    try:
+                        firstobs = int(value)
+                    except ValueError:
+                        return DatasetReferenceOptionSpec(), Diagnostic(
+                            code="PARSE_UNSUPPORTED_STATEMENT",
+                            severity="error",
+                            location=f"statement:{statement_index}",
+                            message=f"Unsupported dataset reference option: {token}",
+                        )
+                    active_collect = None
+                    continue
+
+                if normalized_key == "obs":
+                    try:
+                        obs = int(value)
+                    except ValueError:
+                        return DatasetReferenceOptionSpec(), Diagnostic(
+                            code="PARSE_UNSUPPORTED_STATEMENT",
+                            severity="error",
+                            location=f"statement:{statement_index}",
+                            message=f"Unsupported dataset reference option: {token}",
+                        )
+                    active_collect = None
+                    continue
+
+                if normalized_key == "label":
+                    label = self._strip_quoted_value(value)
+                    active_collect = None
+                    continue
+
                 return DatasetReferenceOptionSpec(), Diagnostic(
                     code="PARSE_UNSUPPORTED_STATEMENT",
                     severity="error",
@@ -794,6 +847,9 @@ class LarkParserService:
                 drop_vars=tuple(drop_vars),
                 where_expr=where_expr,
                 rename_map=rename_map,
+                firstobs=firstobs,
+                obs=obs,
+                label=label,
             ),
             None,
         )
@@ -808,6 +864,30 @@ class LarkParserService:
         if diagnostic is not None:
             return ParsedStatement(kind="RENAME", text=segment), diagnostic
         return ParsedStatement(kind="RENAME", text=segment, rename_map=rename_map), None
+
+    def _parse_label_statement(
+        self,
+        segment: str,
+        statement_index: int,
+    ) -> tuple[ParsedStatement, Diagnostic | None]:
+        body = segment[len("label") :].strip()
+        if not body:
+            return ParsedStatement(kind="LABEL", text=segment), None
+
+        label_map: dict[str, str] = {}
+        pattern = re.compile(r'([A-Za-z_][\w\.]*)\s*=\s*("[^"]*"|\'[^\']*\')')
+        for match in pattern.finditer(body):
+            label_map[match.group(1)] = self._strip_quoted_value(match.group(2))
+
+        if not label_map:
+            return ParsedStatement(kind="LABEL", text=segment), Diagnostic(
+                code="PARSE_UNSUPPORTED_STATEMENT",
+                severity="error",
+                location=f"statement:{statement_index}",
+                message=f"Unsupported LABEL statement syntax: {segment}",
+            )
+
+        return ParsedStatement(kind="LABEL", text=segment, label_map=label_map), None
 
     def _parse_rename_pairs(
         self,
@@ -836,6 +916,12 @@ class LarkParserService:
                 )
             rename_map[normalized_old] = normalized_new
         return rename_map, None
+
+    def _strip_quoted_value(self, value: str) -> str:
+        normalized = value.strip()
+        if len(normalized) >= 2 and normalized[0] == normalized[-1] and normalized[0] in {'"', "'"}:
+            return normalized[1:-1]
+        return normalized
 
     def _split_top_level_tokens(self, text: str) -> list[str]:
         tokens: list[str] = []

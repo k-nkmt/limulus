@@ -95,15 +95,27 @@ RUNTIME_SCENARIOS = {
             ],
         },
         "set_options_single_backend": {
-            "dsl": "data out; set in(keep=id amount drop=amount rename=(id=key) where=(key > 1)); output out; run;",
+            "dsl": "data out; set in(keep=id amount where=(id > 1) drop=amount rename=(id=key)); output out; run;",
             "inputs": [{"id": 1, "amount": 10, "tmp": "a"}, {"id": 2, "amount": 20, "tmp": "b"}],
             "expected_output": [{"key": 2}],
             "expected_backend": "python",
         },
         "set_options_cross_backend": {
-            "dsl": "data out; set in(keep=id amount drop=amount rename=(id=key) where=(key > 1)); output out; run;",
+            "dsl": "data out; set in(keep=id amount where=(id > 1) drop=amount rename=(id=key)); output out; run;",
             "inputs": [{"id": 1, "amount": 10, "tmp": "a"}, {"id": 2, "amount": 20, "tmp": "b"}],
             "expected_python": [{"key": 2}],
+        },
+        "set_options_obs_cross_backend": {
+            "dsl": (
+                "data out; set in(keep=id amount where=(amount >= 20) rename=(amount=amt) firstobs=2 obs=1); "
+                "output out; run;"
+            ),
+            "inputs": [
+                {"id": 1, "amount": 10, "tmp": "a"},
+                {"id": 2, "amount": 20, "tmp": "b"},
+                {"id": 3, "amount": 30, "tmp": "c"},
+            ],
+            "expected_python": [{"id": 3, "amt": 30}],
         },
         "output_options_cross_backend": {
             "dsl": "data out(keep=id name drop=name rename=(id=subject_id)); set in; output out; run;",
@@ -115,6 +127,23 @@ RUNTIME_SCENARIOS = {
             "inputs_a": [{"id": 1, "xa": 10, "tmp": "a"}, {"id": 2, "xa": 20, "tmp": "b"}],
             "inputs_b": [{"id": 1, "xb": 100}, {"id": 3, "xb": 300}],
             "expected_python": [{"id": 1, "x": 10, "y": 100}, {"id": 2, "x": 20}, {"id": 3, "y": 300}],
+        },
+        "merge_options_obs_cross_backend": {
+            "dsl": (
+                "data out; merge a(firstobs=2 obs=1 keep=id xa rename=(xa=x)) "
+                "b(firstobs=2 obs=1 keep=id xb rename=(xb=y)); by id; output out; run;"
+            ),
+            "inputs_a": [
+                {"id": 1, "xa": 10, "tmp": "a"},
+                {"id": 2, "xa": 20, "tmp": "b"},
+                {"id": 3, "xa": 30, "tmp": "c"},
+            ],
+            "inputs_b": [
+                {"id": 1, "xb": 100},
+                {"id": 2, "xb": 200},
+                {"id": 3, "xb": 300},
+            ],
+            "expected_python": [{"id": 2, "x": 20, "y": 200}],
         },
         "where_statement_multi_set_cross_backend": {
             "dsl": "data out; set a b; where id >= 2; output out; run;",
@@ -388,6 +417,7 @@ class RuntimeNativeIntegrationTests(unittest.TestCase):
         }
 
         outputs_by_backend: dict[str, list[dict[str, object]]] = {}
+        last_backend_by_preference: dict[str, str] = {}
         for runtime_backend in ("python", "rust"):
             executor = DataStepExecutor(runtime_backend=runtime_backend)
             response = executor.execute(
@@ -400,9 +430,42 @@ class RuntimeNativeIntegrationTests(unittest.TestCase):
 
             self.assertFalse(response.has_errors)
             outputs_by_backend[runtime_backend] = _output_rows(response, "out")
+            last_backend_by_preference[runtime_backend] = executor.last_runtime_backend
 
         self.assertEqual(outputs_by_backend["python"], scenario["expected_python"])
         self.assertEqual(outputs_by_backend["rust"], outputs_by_backend["python"])
+        self.assertEqual(last_backend_by_preference["rust"], "rust")
+
+    def test_runtime_applies_obs_firstobs_dataset_options_for_python_and_rust_preferences(self) -> None:
+        scenario = RUNTIME_SCENARIOS["dataset_option_compatibility"]["set_options_obs_cross_backend"]
+        dsl_text = scenario["dsl"]
+        inputs = {
+            "in": DataSetRef(
+                kind="arrow_table",
+                location="dataset://in",
+                payload=_arrow_table(scenario["inputs"]),
+            )
+        }
+
+        outputs_by_backend: dict[str, list[dict[str, object]]] = {}
+        last_backend_by_preference: dict[str, str] = {}
+        for runtime_backend in ("python", "rust"):
+            executor = DataStepExecutor(runtime_backend=runtime_backend)
+            response = executor.execute(
+                ExecuteRequest(
+                    dsl_text=dsl_text,
+                    inputs=inputs,
+                    output_targets=["out"],
+                )
+            )
+
+            self.assertFalse(response.has_errors)
+            outputs_by_backend[runtime_backend] = _output_rows(response, "out")
+            last_backend_by_preference[runtime_backend] = executor.last_runtime_backend
+
+        self.assertEqual(outputs_by_backend["python"], scenario["expected_python"])
+        self.assertEqual(outputs_by_backend["rust"], outputs_by_backend["python"])
+        self.assertEqual(last_backend_by_preference["rust"], "rust")
 
     def test_runtime_applies_output_dataset_options_for_python_and_rust_preferences(self) -> None:
         scenario = RUNTIME_SCENARIOS["dataset_option_compatibility"]["output_options_cross_backend"]
@@ -434,6 +497,41 @@ class RuntimeNativeIntegrationTests(unittest.TestCase):
 
     def test_merge_dataset_options_are_consistent_between_python_and_rust_preferences(self) -> None:
         scenario = RUNTIME_SCENARIOS["dataset_option_compatibility"]["merge_options_cross_backend"]
+        dsl_text = scenario["dsl"]
+        inputs = {
+            "a": DataSetRef(
+                kind="arrow_table",
+                location="dataset://a",
+                payload=_arrow_table(scenario["inputs_a"]),
+            ),
+            "b": DataSetRef(
+                kind="arrow_table",
+                location="dataset://b",
+                payload=_arrow_table(scenario["inputs_b"]),
+            ),
+        }
+
+        outputs_by_backend: dict[str, list[dict[str, object]]] = {}
+        last_backend_by_preference: dict[str, str] = {}
+        for runtime_backend in ("python", "rust"):
+            executor = DataStepExecutor(runtime_backend=runtime_backend)
+            response = executor.execute(
+                ExecuteRequest(
+                    dsl_text=dsl_text,
+                    inputs=inputs,
+                    output_targets=["out"],
+                )
+            )
+            self.assertFalse(response.has_errors)
+            outputs_by_backend[runtime_backend] = _output_rows(response, "out")
+            last_backend_by_preference[runtime_backend] = executor.last_runtime_backend
+
+        self.assertEqual(outputs_by_backend["python"], scenario["expected_python"])
+        self.assertEqual(outputs_by_backend["rust"], outputs_by_backend["python"])
+        self.assertEqual(last_backend_by_preference["rust"], "rust")
+
+    def test_merge_obs_firstobs_dataset_options_are_consistent_between_python_and_rust_preferences(self) -> None:
+        scenario = RUNTIME_SCENARIOS["dataset_option_compatibility"]["merge_options_obs_cross_backend"]
         dsl_text = scenario["dsl"]
         inputs = {
             "a": DataSetRef(

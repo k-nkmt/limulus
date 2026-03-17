@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 import re
 import time
 from collections.abc import Iterable, Mapping, Sequence
@@ -15,7 +16,7 @@ from .models import DatasetCatalog, ExecuteRequest, LogEntry, SubmitResult
 class DatasetView:
     """A view for chained operations on a dataset.
 
-    Obtained via :meth:`Session.dataset`. You can chain :meth:`keep` / :meth:`drop` /
+    Obtained via :meth:`Session.dataset`. You can chain :meth:`select` / :meth:`keep` / :meth:`drop` /
     :meth:`where` / :meth:`rename` / :meth:`sort` calls.
 
     Examples:
@@ -43,61 +44,94 @@ class DatasetView:
         """Converts this dataset to a ``polars.DataFrame`` and returns it."""
         return self._session.to_polars(self._name)
 
-    def keep(self, columns: Sequence[str], target: str | None = None) -> "DatasetView":
+    def select(self, columns: Sequence[str], out: str | None = None) -> "DatasetView":
+        """Retains only the specified columns.
+
+        Args:
+            columns: List of column names to keep.
+            out: Output dataset name. If omitted, overwrites this view's dataset.
+
+        Returns:
+            A :class:`DatasetView` for the resulting dataset.
+        """
+        output_name = self._session._resolve_output_name(self._name, out=out)
+        self._session.select(self._name, columns, out=output_name)
+        return DatasetView(self._session, output_name)
+
+    def keep(self, columns: Sequence[str], out: str | None = None) -> "DatasetView":
         """Retains only the specified columns (equivalent to KEEP).
 
         Args:
             columns: List of column names to keep.
-            target: Output dataset name. If omitted, overwrites this view's dataset.
+            out: Output dataset name. If omitted, overwrites this view's dataset.
 
         Returns:
             A :class:`DatasetView` for the resulting dataset.
         """
-        output_name = target or self._name
-        self._session.keep(self._name, columns, target=output_name)
-        return DatasetView(self._session, output_name)
+        return self.select(columns, out=out)
 
-    def drop(self, columns: Sequence[str], target: str | None = None) -> "DatasetView":
+    def drop(self, columns: Sequence[str], out: str | None = None) -> "DatasetView":
         """Removes the specified columns (equivalent to DROP).
 
         Args:
             columns: List of column names to remove.
-            target: Output dataset name. If omitted, overwrites this view's dataset.
+            out: Output dataset name. If omitted, overwrites this view's dataset.
 
         Returns:
             A :class:`DatasetView` for the resulting dataset.
         """
-        output_name = target or self._name
-        self._session.drop(self._name, columns, target=output_name)
+        output_name = self._session._resolve_output_name(self._name, out=out)
+        self._session.drop(self._name, columns, out=output_name)
         return DatasetView(self._session, output_name)
 
-    def where(self, expression: str, target: str | None = None) -> "DatasetView":
+    def where(self, expression: str, out: str | None = None) -> "DatasetView":
         """Filters rows using a simple comparison expression (equivalent to WHERE).
 
         Args:
             expression: Filter expression, e.g. ``"age > 13"``, ``"sex = 'M'"``.
-            target: Output dataset name. If omitted, overwrites this view's dataset.
+            out: Output dataset name. If omitted, overwrites this view's dataset.
 
         Returns:
             A :class:`DatasetView` for the resulting dataset.
         """
-        output_name = target or self._name
-        self._session.where(self._name, expression, target=output_name)
+        output_name = self._session._resolve_output_name(self._name, out=out)
+        self._session.where(self._name, expression, out=output_name)
         return DatasetView(self._session, output_name)
 
-    def rename(self, mapping: Mapping[str, str], target: str | None = None) -> "DatasetView":
+    def rename(self, mapping: Mapping[str, str], out: str | None = None) -> "DatasetView":
         """Renames columns (equivalent to RENAME).
 
         Args:
             mapping: A ``{old_name: new_name}`` mapping dict.
-            target: Output dataset name. If omitted, overwrites this view's dataset.
+            out: Output dataset name. If omitted, overwrites this view's dataset.
 
         Returns:
             A :class:`DatasetView` for the resulting dataset.
         """
-        output_name = target or self._name
-        self._session.rename(self._name, mapping, target=output_name)
+        output_name = self._session._resolve_output_name(self._name, out=out)
+        self._session.rename(self._name, mapping, out=output_name)
         return DatasetView(self._session, output_name)
+
+    def astype(self, mapping: Mapping[str, str], out: str | None = None) -> "DatasetView":
+        """Casts columns using a ``{column: dtype}`` mapping.
+
+        Args:
+            mapping: Mapping from column name to dtype string.
+            out: Output dataset name. If omitted, overwrites this view's dataset.
+
+        Returns:
+            A :class:`DatasetView` for the resulting dataset.
+
+        Note:
+            Column names in this column-oriented API are currently case-sensitive.
+        """
+        output_name = self._session._resolve_output_name(self._name, out=out)
+        self._session._astype_dataset(self._name, mapping, out=output_name)
+        return DatasetView(self._session, output_name)
+
+    def cast(self, mapping: Mapping[str, str], out: str | None = None) -> "DatasetView":
+        """Alias for :meth:`astype`."""
+        return self.astype(mapping, out=out)
 
     def apply_options(
         self,
@@ -106,7 +140,7 @@ class DatasetView:
         drop: Sequence[str] | None = None,
         rename: Mapping[str, str] | None = None,
         where: str | None = None,
-        target: str | None = None,
+        out: str | None = None,
     ) -> "DatasetView":
         """Applies ``keep``/``drop``/``rename``/``where`` in a single call.
 
@@ -115,35 +149,43 @@ class DatasetView:
             drop: List of column names to remove.
             rename: A ``{old_name: new_name}`` mapping dict.
             where: Filter expression (e.g. ``"age > 13"``).
-            target: Output dataset name. If omitted, overwrites this view's dataset.
+            out: Output dataset name. If omitted, overwrites this view's dataset.
 
         Returns:
             A :class:`DatasetView` for the resulting dataset.
         """
-        output_name = target or self._name
+        output_name = self._session._resolve_output_name(self._name, out=out)
         self._session.apply_dataset_options(
             self._name,
             keep=keep,
             drop=drop,
             rename=rename,
             where=where,
-            target=output_name,
+            out=output_name,
         )
         return DatasetView(self._session, output_name)
     
-    def sort(self, by: Sequence[str], target: str | None = None) -> "DatasetView":
+    def sort(
+        self,
+        by: Sequence[str],
+        out: str | None = None,
+        *,
+        nodupkey: bool = False,
+    ) -> "DatasetView":
         """Sorts the dataset by columns.
 
         Args:
             by: List of column names to sort by. Can also be a list of
                 ``(column_name, "ascending" | "descending")`` tuples to specify direction.
-            target: Output dataset name. If omitted, overwrites this view's dataset.
+            out: Output dataset name. If omitted, overwrites this view's dataset.
+            nodupkey: When ``True``, keeps only the first row for each unique key
+                defined by ``by`` after sorting.
 
         Returns:
             A :class:`DatasetView` for the resulting dataset.
         """
-        output_name = target or self._name
-        self._session.sort(self._name, by, target=output_name)
+        output_name = self._session._resolve_output_name(self._name, out=out)
+        self._session.sort(self._name, by, out=output_name, nodupkey=nodupkey)
         return DatasetView(self._session, output_name)
 
     def unload(self, *, missing_ok: bool = True) -> bool:
@@ -160,6 +202,10 @@ class DatasetView:
 
 class Session:
     _SIMPLE_FILTER = re.compile(r"^\s*([A-Za-z_][\w\.]*)\s*(>=|<=|!=|=|>|<)\s*(.+?)\s*$")
+    _CREATE_TABLE_SQL = re.compile(
+        r"^\s*create\s+table\s+([A-Za-z_][\w]*)\s+as\s+(.*?)\s*;?\s*$",
+        re.IGNORECASE | re.DOTALL,
+    )
 
     def __init__(
         self,
@@ -167,6 +213,7 @@ class Session:
         backend: str = "auto",
         runtime_backend: str | None = None,
         parser_backend: str = "python",
+        options: Mapping[str, Any] | None = None,
     ) -> None:
         """Creates a limulus execution session.
 
@@ -178,6 +225,8 @@ class Session:
                 With ``"auto"``, the Rust backend is used when input is an Arrow table; otherwise Python.
             runtime_backend: Explicit override for the backend. Takes precedence over ``backend``.
             parser_backend: Parser backend. Currently only ``"python"`` (lark) is stable.
+            options: Session-level option dictionary. These attributes are currently reserved for
+                future use, but are propagated with each submit request.
 
         Examples:
             >>> import limulus
@@ -191,6 +240,7 @@ class Session:
         )
         self._datasets = DatasetCatalog()
         self._last_submit_result: SubmitResult | None = None
+        self._options: dict[str, Any] = dict(options or {})
 
     def load(self, name: str, data: Any) -> None:
         """Registers a single dataset in the session catalog.
@@ -319,7 +369,7 @@ class Session:
             _original_backend = self._executor._runtime_backend_preference
             self._executor.set_runtime_backend(backend)
         try:
-            response = self._executor.execute(ExecuteRequest(dsl_text=code))
+            response = self._executor.execute(ExecuteRequest(dsl_text=code, options=dict(self._options)))
         finally:
             if backend is not None:
                 self._executor.set_runtime_backend(_original_backend)
@@ -461,41 +511,74 @@ class Session:
         """
         return self.log
 
+    def set_option(self, options: Mapping[str, Any]) -> Session:
+        """Merges session options from a dictionary.
 
-    def select(self, source: str, columns: Sequence[str], target: str | None = None) -> Session:
+        These options are currently reserved for future use, but are forwarded
+        to the executor on each :meth:`submit` call.
+        """
+        self._options.update(dict(options))
+        return self
+
+    def get_option(self, name: str | Sequence[str] | None = None, default: Any = None) -> Any:
+        """Returns session options as a value or dictionary.
+
+        When ``name`` is omitted, returns a copy of all options. When a list of
+        keys is given, returns a dictionary for those keys. When a single key is
+        given, returns its value or ``default``.
+        """
+        if name is None:
+            return dict(self._options)
+        if isinstance(name, str):
+            return self._options.get(name, default)
+        return {key: self._options.get(key, default) for key in name}
+
+    def include(self, path: str) -> SubmitResult:
+        """Reads a DSL file and executes it via :meth:`submit`.
+
+        Args:
+            path: Path to a UTF-8 encoded Data Step script.
+
+        Returns:
+            The resulting :class:`~limulus.SubmitResult`.
+        """
+        return self.submit(Path(path).read_text(encoding="utf-8"))
+
+
+    def select(self, source: str, columns: Sequence[str], out: str | None = None, *, target: str | None = None) -> Session:
         """Column selection (alias for :meth:`keep`).
 
         """
         table = self.to_arrow(source)
         selected = table.select(list(columns))
-        output_name = target or source
+        output_name = self._resolve_output_name(source, out=out, target=target)
         self.load(output_name, selected)
         return self
 
-    def keep(self, source: str, columns: Sequence[str], target: str | None = None) -> Session:
+    def keep(self, source: str, columns: Sequence[str], out: str | None = None, *, target: str | None = None) -> Session:
         """Retains only the specified columns from a dataset (equivalent to KEEP).
 
         Args:
             source: Source dataset name.
             columns: List of column names to keep.
-            target: Output dataset name. If omitted, overwrites ``source``.
+            out: Output dataset name. If omitted, overwrites ``source``.
 
         Returns:
             ``self`` (for method chaining).
 
         Examples:
             >>> session.keep("bmi", ["name", "sex", "bmi"])
-            >>> session.keep("bmi", ["name", "bmi"], target="bmi_slim")
+            >>> session.keep("bmi", ["name", "bmi"], out="bmi_slim")
         """
-        return self.select(source, columns, target=target)
+        return self.select(source, columns, out=out, target=target)
 
-    def rename(self, source: str, mapping: Mapping[str, str], target: str | None = None) -> Session:
+    def rename(self, source: str, mapping: Mapping[str, str], out: str | None = None, *, target: str | None = None) -> Session:
         """Renames columns (equivalent to RENAME).
 
         Args:
             source: Source dataset name.
             mapping: A ``{old_name: new_name}`` mapping dict.
-            target: Output dataset name. If omitted, overwrites ``source``.
+            out: Output dataset name. If omitted, overwrites ``source``.
 
         Returns:
             ``self`` (for method chaining).
@@ -506,11 +589,57 @@ class Session:
         table = self.to_arrow(source)
         renamed_columns = [mapping.get(name, name) for name in table.column_names]
         renamed = table.rename_columns(renamed_columns)
-        output_name = target or source
+        output_name = self._resolve_output_name(source, out=out, target=target)
         self.load(output_name, renamed)
         return self
 
-    def filter(self, source: str, expression: str, target: str | None = None) -> Session:
+    def _astype_dataset(self, source: str, mapping: Mapping[str, str], out: str | None = None, *, target: str | None = None) -> Session:
+        table = self.to_arrow(source)
+        frame = pl.from_arrow(table)
+        casted = self._polars_result_to_arrow(
+            frame.cast({name: self._resolve_polars_dtype(dtype) for name, dtype in mapping.items()}),
+            table,
+        )
+        output_name = self._resolve_output_name(source, out=out, target=target)
+        self.load(output_name, casted)
+        return self
+
+    def cast(self, source: str, mapping: Mapping[str, str], out: str | None = None, *, target: str | None = None) -> Session:
+        """Alias for dataset-scoped column casting.
+
+        This is a convenience alias for the DatasetView-style :meth:`DatasetView.astype`
+        workflow and forwards to the same internal implementation.
+        """
+        return self._astype_dataset(source, mapping, out=out, target=target)
+
+    def sql(self, query: str, out: str | None = None, *, target: str | None = None):
+        """Executes SQL against session datasets.
+
+        Args:
+            query: SQL text executed against datasets currently loaded in the session.
+            out: Optional explicit output dataset name.
+
+        Returns:
+            A ``pyarrow.Table`` containing the query result.
+
+        SQL execution is backed by the Polars SQL engine. 
+        https://docs.pola.rs/api/python/stable/reference/sql/index.html
+        If the SQL starts with ``CREATE TABLE name AS ...``, the result is also 
+        stored in the session catalog under ``name``. 
+        """
+        context = pl.SQLContext()
+        source_tables = {name: self.to_arrow(name) for name in self._datasets}
+        for name, table in source_tables.items():
+            context.register(name, pl.from_arrow(table))
+        inferred_target, executable_query = self._extract_sql_target(query)
+        output_name = self._resolve_output_name(inferred_target, out=out, target=target)
+        result = context.execute(executable_query)
+        table = self._polars_result_to_arrow(result, *source_tables.values())
+        if output_name is not None:
+            self.load(output_name, table)
+        return table
+
+    def filter(self, source: str, expression: str, out: str | None = None, *, target: str | None = None) -> Session:
         """Row filtering (alias for :meth:`where`).
 
         """
@@ -558,11 +687,11 @@ class Session:
             mask = pc.not_equal(column, scalar)
 
         filtered = table.filter(mask)
-        output_name = target or source
+        output_name = self._resolve_output_name(source, out=out, target=target)
         self.load(output_name, filtered)
         return self
 
-    def where(self, source: str, expression: str, target: str | None = None) -> Session:
+    def where(self, source: str, expression: str, out: str | None = None, *, target: str | None = None) -> Session:
         """Filters rows using a simple comparison expression (equivalent to WHERE).
 
         Supported expression format: ``"column op value"`` (e.g. ``"age > 13"``, ``"sex = 'M'``").
@@ -570,7 +699,7 @@ class Session:
         Args:
             source: Source dataset name.
             expression: Filter expression. 
-            target: Output dataset name. If omitted, overwrites ``source``.
+            out: Output dataset name. If omitted, overwrites ``source``.
 
         Returns:
             ``self`` (for method chaining).
@@ -580,33 +709,43 @@ class Session:
 
         Examples:
             >>> session.where("class", "age > 13")
-            >>> session.where("class", "sex = 'M'", target="male")
+            >>> session.where("class", "sex = 'M'", out="male")
         """
-        return self.filter(source, expression, target=target)
+        return self.filter(source, expression, out=out, target=target)
 
-    def drop(self, source: str, columns: Sequence[str], target: str | None = None) -> Session:
+    def drop(self, source: str, columns: Sequence[str], out: str | None = None, *, target: str | None = None) -> Session:
         """Removes the specified columns from a dataset (equivalent to DROP).
 
         Args:
             source: Source dataset name.
             columns: List of column names to remove.
-            target: Output dataset name. If omitted, overwrites ``source``.
+            out: Output dataset name. If omitted, overwrites ``source``.
 
         Returns:
             ``self`` (for method chaining).
         """
         table = self.to_arrow(source)
         keep_columns = [name for name in table.column_names if name not in set(columns)]
-        return self.select(source, keep_columns, target=target)
+        return self.select(source, keep_columns, out=out, target=target)
     
-    def sort(self, source: str, by: Sequence[str], target: str | None = None) -> Session:
+    def sort(
+        self,
+        source: str,
+        by: Sequence[str],
+        out: str | None = None,
+        *,
+        nodupkey: bool = False,
+        target: str | None = None,
+    ) -> Session:
         """Sorts a dataset by columns.
 
         Args:
             source: Source dataset name.
             by: List of column names to sort by. Can also be a list of
                 ``(column_name, "ascending" | "descending")`` tuples to specify direction.
-            target: Output dataset name. If omitted, overwrites ``source``.
+            out: Output dataset name. If omitted, overwrites ``source``.
+            nodupkey: When ``True``, keeps only the first row for each unique key
+                defined by ``by`` after sorting.
 
         Returns:
             ``self`` (for method chaining).
@@ -615,18 +754,15 @@ class Session:
             >>> session.sort("class", "age")
             >>> session.sort("class", ["age", "name"])
             >>> session.sort("class", [("age", "descending")])
+            >>> session.sort("class", ["age"], nodupkey=True)
         """
         table = self.to_arrow(source)
-        if isinstance(by, str):
-            key = by
-        elif isinstance(by, list):
-            if isinstance(by[0], str):
-                key = [(col, "ascending") for col in by]
-            else:
-                key = by
+        key, key_names = self._normalize_sort_key(by)
 
         sorted_table = table.sort_by(key)
-        output_name = target or source
+        if nodupkey:
+            sorted_table = self._sort_unique_by_keys(sorted_table, key_names)
+        output_name = self._resolve_output_name(source, out=out, target=target)
         self.load(output_name, sorted_table)
         return self
 
@@ -638,12 +774,13 @@ class Session:
         drop: Sequence[str] | None = None,
         rename: Mapping[str, str] | None = None,
         where: str | None = None,
+        out: str | None = None,
         target: str | None = None,
     ) -> Session:
         """Applies ``keep``/``drop``/``rename``/``where`` in a single call.
 
         Multiple operations can be performed in one call.
-        Application order: ``where`` → ``keep`` → ``drop`` → ``rename``.
+        Application order: ``keep`` → ``drop`` → ``where`` → ``rename``.
 
         Args:
             source: Source dataset name.
@@ -651,28 +788,28 @@ class Session:
             drop: List of column names to remove.
             rename: A ``{old_name: new_name}`` mapping dict.
             where: Filter expression (same format as :meth:`where`).
-            target: Output dataset name. If omitted, overwrites ``source``.
+            out: Output dataset name. If omitted, overwrites ``source``.
 
         Returns:
             ``self`` (for method chaining).
         """
-        output_name = target or source
-        if where:
-            self.where(source, where, target=output_name)
-            source_name = output_name
-        else:
-            source_name = source
+        output_name = self._resolve_output_name(source, out=out, target=target)
+        source_name = source
 
         if keep:
-            self.keep(source_name, list(keep), target=output_name)
+            self.keep(source_name, list(keep), out=output_name)
             source_name = output_name
 
         if drop:
-            self.drop(source_name, list(drop), target=output_name)
+            self.drop(source_name, list(drop), out=output_name)
+            source_name = output_name
+
+        if where:
+            self.where(source_name, where, out=output_name)
             source_name = output_name
 
         if rename:
-            self.rename(source_name, rename, target=output_name)
+            self.rename(source_name, rename, out=output_name)
 
         return self
 
@@ -717,6 +854,49 @@ class Session:
         raise ValueError("Unsupported dataset type for Session.load")
 
     @staticmethod
+    def _resolve_output_name(source: str | None, *, out: str | None = None, target: str | None = None) -> str | None:
+        if out is not None and target is not None and out != target:
+            raise ValueError("out and target must match when both are provided")
+        if out is not None:
+            return out
+        if target is not None:
+            return target
+        return source
+
+    @staticmethod
+    def _normalize_sort_key(by: str | Sequence[str]) -> tuple[str | list[tuple[str, str]], tuple[str, ...]]:
+        if isinstance(by, str):
+            return by, (by,)
+
+        sort_items = list(by)
+        if not sort_items:
+            raise ValueError("Session.sort requires at least one sort key")
+        if isinstance(sort_items[0], str):
+            names = tuple(str(item) for item in sort_items)
+            return [(name, "ascending") for name in names], names
+
+        normalized_items = [(str(item[0]), str(item[1])) for item in sort_items]
+        return normalized_items, tuple(name for name, _ in normalized_items)
+
+    @classmethod
+    def _sort_unique_by_keys(cls, table: pa.Table, key_names: Sequence[str]) -> pa.Table:
+        if not key_names:
+            return table
+
+        rows = table.to_pylist()
+        seen: set[tuple[Any, ...]] = set()
+        unique_rows: list[dict[str, Any]] = []
+        for row in rows:
+            key = tuple(row.get(name) for name in key_names)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique_rows.append(dict(row))
+
+        deduped = pa.Table.from_pylist(unique_rows)
+        return cls._preserve_arrow_metadata(table, deduped)
+
+    @staticmethod
     def _iter_dataset_names(names: Sequence[str | Sequence[str]]) -> Iterable[str]:
         for name in names:
             if isinstance(name, str):
@@ -729,3 +909,81 @@ class Session:
                     yield nested
                 continue
             raise TypeError("Dataset names must be strings or sequences of strings.")
+
+    @staticmethod
+    def _preserve_arrow_metadata(source: pa.Table, target: pa.Table) -> pa.Table:
+        return Session._restore_arrow_schema_from_sources(target, source_tables=(source,))
+
+    @staticmethod
+    def _polars_result_to_arrow(result: Any, *source_tables: pa.Table) -> pa.Table:
+        if hasattr(result, "collect"):
+            result = result.collect()
+        return Session._restore_arrow_schema_from_sources(result.to_arrow(), source_tables=source_tables)
+
+    @staticmethod
+    def _restore_arrow_schema_from_sources(target: pa.Table, *, source_tables: Sequence[pa.Table]) -> pa.Table:
+        if not source_tables:
+            return target
+
+        target_schema = target.schema
+        source_fields: dict[str, pa.Field] = {}
+        ambiguous_fields: set[str] = set()
+
+        for source in source_tables:
+            for field in source.schema:
+                existing_field = source_fields.get(field.name)
+                if existing_field is None:
+                    source_fields[field.name] = field
+                    continue
+                if existing_field.metadata != field.metadata:
+                    ambiguous_fields.add(field.name)
+
+        fields = []
+        for field in target_schema:
+            source_field = None if field.name in ambiguous_fields else source_fields.get(field.name)
+            if source_field is None or source_field.metadata is None:
+                fields.append(field)
+                continue
+            fields.append(field.with_metadata(source_field.metadata))
+
+        schema_metadata = target_schema.metadata
+        if len(source_tables) == 1 and source_tables[0].schema.metadata is not None:
+            schema_metadata = source_tables[0].schema.metadata
+
+        schema = pa.schema(fields, metadata=schema_metadata)
+        return pa.Table.from_arrays([target.column(index) for index in range(target.num_columns)], schema=schema)
+
+    @staticmethod
+    def _resolve_polars_dtype(dtype: Any) -> Any:
+        if not isinstance(dtype, str):
+            return dtype
+
+        normalized = dtype.strip().lower()
+        mapping = {
+            "int8": pl.Int8,
+            "int16": pl.Int16,
+            "int32": pl.Int32,
+            "int64": pl.Int64,
+            "uint8": pl.UInt8,
+            "uint16": pl.UInt16,
+            "uint32": pl.UInt32,
+            "uint64": pl.UInt64,
+            "float32": pl.Float32,
+            "float64": pl.Float64,
+            "bool": pl.Boolean,
+            "boolean": pl.Boolean,
+            "str": pl.String,
+            "string": pl.String,
+            "utf8": pl.String,
+        }
+        resolved = mapping.get(normalized)
+        if resolved is None:
+            raise ValueError(f"Unsupported dtype for DatasetView.astype: {dtype}")
+        return resolved
+
+    @classmethod
+    def _extract_sql_target(cls, query: str) -> tuple[str | None, str]:
+        matched = cls._CREATE_TABLE_SQL.match(query)
+        if matched is None:
+            return None, query
+        return matched.group(1), matched.group(2).strip()

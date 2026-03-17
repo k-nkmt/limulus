@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import re
+from dataclasses import replace
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -11,7 +12,7 @@ import pyarrow as pa
 
 from .models import DataSetRef, Diagnostic, ExecuteRequest
 from .native_bridge import load_native_module
-from .parser import ast_statements_to_dict
+from .parser import DatasetReference, DatasetReferenceOptionSpec, ast_statements_to_dict
 
 
 @dataclass(frozen=True)
@@ -41,6 +42,7 @@ RuntimeExecuteFn = Callable[[RuntimeExecutionContext], tuple[dict[str, DataSetRe
 
 class RustArrowIOBridge:
     _APPLY_CALL_PATTERN = re.compile(r"\bapply\s*\(", re.IGNORECASE)
+    _PREPARED_SET_ROWS_MARKER = "#prepared_set_rows"
     _PREPARED_MERGE_ROWS_MARKER = "#prepared_merge_rows"
 
     def build_payload(
@@ -48,6 +50,7 @@ class RustArrowIOBridge:
         context: RuntimeExecutionContext,
         function_registry_keys: tuple[str, ...],
     ) -> tuple[RustExecutionPayload | None, list[Diagnostic]]:
+        ast_statements = self._prepare_ast_statements(context)
         input_streams: dict[str, Any] = {}
         legacy_inputs: dict[str, Any] = {}
         prepared_merge_mode = False
@@ -59,12 +62,15 @@ class RustArrowIOBridge:
                 location = dataset_ref.location or ""
                 payload = dataset_ref.payload
                 if (
-                    self._PREPARED_MERGE_ROWS_MARKER in location
+                    (
+                        self._PREPARED_SET_ROWS_MARKER in location
+                        or self._PREPARED_MERGE_ROWS_MARKER in location
+                    )
                     and isinstance(payload, Sequence)
                     and not isinstance(payload, (str, bytes, bytearray))
                     and all(isinstance(item, Mapping) for item in payload)
                 ):
-                    prepared_merge_mode = True
+                    prepared_merge_mode = self._PREPARED_MERGE_ROWS_MARKER in location
                     prepared_rows = [dict(item) for item in payload]
                     try:
                         all_keys: list[str] = []
@@ -130,7 +136,7 @@ class RustArrowIOBridge:
                 )
                 return None, diagnostics
 
-        for index, statement in enumerate(context.ast_statements, start=1):
+        for index, statement in enumerate(ast_statements, start=1):
             statement_text = getattr(statement, "text", "")
             if isinstance(statement_text, str) and self._APPLY_CALL_PATTERN.search(statement_text):
                 diagnostics.append(
@@ -145,7 +151,7 @@ class RustArrowIOBridge:
 
         return (
             RustExecutionPayload(
-                ast_statements=context.ast_statements,
+                ast_statements=ast_statements,
                 output_targets=context.resolved_output_targets,
                 input_streams=input_streams,
                 legacy_inputs=legacy_inputs,
@@ -154,6 +160,45 @@ class RustArrowIOBridge:
             ),
             diagnostics,
         )
+
+    def _prepare_ast_statements(
+        self,
+        context: RuntimeExecutionContext,
+    ) -> tuple[Any, ...]:
+        filtered_statements = tuple(
+            statement
+            for statement in context.ast_statements
+            if getattr(statement, "kind", "") != "LABEL"
+        )
+
+        prepared_set_sources = {
+            name
+            for name, dataset_ref in context.resolved_inputs.items()
+            if dataset_ref.kind.strip().lower() == "memory"
+            and self._PREPARED_SET_ROWS_MARKER in (dataset_ref.location or "")
+        }
+        if not prepared_set_sources:
+            return filtered_statements
+
+        normalized: list[Any] = []
+        for statement in filtered_statements:
+            if getattr(statement, "kind", "") != "SET":
+                normalized.append(statement)
+                continue
+
+            dataset_refs = tuple(
+                DatasetReference(name=name, options=DatasetReferenceOptionSpec())
+                for name in prepared_set_sources
+            )
+            normalized.append(
+                replace(
+                    statement,
+                    text="set " + " ".join(ref.name for ref in dataset_refs),
+                    dataset_refs=dataset_refs,
+                )
+            )
+
+        return tuple(normalized)
 
 
 class RustNativeBlockExecutor:

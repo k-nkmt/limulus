@@ -31,7 +31,10 @@ limulus/              Python package
   session.py          Session class (user-facing interface layer)
   runtime.py          Execution services (PDVRuntime, ProgramExecution, etc.)
   executor.py         Backend selection & management
-  executor_python.py  Python backend
+    executor_python.py  Python backend orchestration entry point
+    executor_py_stage.py  Python backend pipeline stages (input preparation / runtime dispatch)
+    executor_py_stmt.py   Python statement-block execution helpers
+    executor_py_data.py   Dataset option / SET / MERGE helpers used by Python backend
   parser.py           Parser backend selection & AST models
   models.py           Shared data models (Diagnostic, SubmitResult, etc.)
   io.py               Arrow ↔ row-list conversion
@@ -70,6 +73,9 @@ DataStepExecutor (executor.py)
     │  6) pre-evaluations
     │  7) execute runtime backend
     │      ├─ Python backend → PythonBackendExecutionService (executor_python.py)
+    │      │                     ├─ pipeline stages (executor_py_stage.py)
+    │      │                     ├─ statement helpers (executor_py_stmt.py)
+    │      │                     ├─ dataset helpers (executor_py_data.py)
     │      │                     └─ PDVRuntimeService (runtime.py)
     │      └─ Rust backend   → limulus_native.execute_datastep (lib.rs)
     │  8) resolve outputs (temporary/internal variable filtering)
@@ -84,7 +90,7 @@ ExecuteResponse → Session catalog (Arrow tables)
 |------|------|
 | Parser | lark only (Python). Rust is not involved in parsing |
 | Data representation | Storage/I/O uses Apache Arrow. During PDV loop, converted to row dicts |
-| Rust scope | Native block execution via Arrow C stream bridge; orchestrated by Python pipeline |
+| Rust scope | Native block execution via Arrow C stream bridge; shared preprocessing and orchestration stay in `executor.py` |
 | Backend selection | `auto` or `rust` preference may fall back to Python when Rust capability/inputs are unsupported (e.g. non-arrow inputs, `apply()`) |
 | BY groups | executor sorts ascending by BY variables (Arrow-native) before execution |
 | SUM statement behavior | Based on current row value; `sum_totals` acts as fallback when variable is absent from row |
@@ -101,6 +107,12 @@ ExecuteResponse → Session catalog (Arrow tables)
     are filtered centrally in the pipeline output stage (`resolve outputs`).
 - This filtering is backend-agnostic and is applied after runtime execution so behavior is consistent across
     Python and Rust backends.
+
+### Backend Boundary
+
+- Files named `executor_python*` are intended to remain Python-backend specific.
+- Shared behavior that must also apply to Rust or `auto` execution, such as backend-agnostic input normalization or source dataset option preprocessing, should live in `executor.py` or other non-Python-specific modules.
+- This keeps the Python backend files focused on Python row-loop execution details and avoids implying that Rust execution depends on `executor_python*` internals.
 
 ---
 
@@ -126,14 +138,18 @@ uv run maturin develop --release
 uv run pytest               # all tests
 uv run pytest -q            # concise output
 uv run pytest -x            # stop on first failure
-uv run pytest tests/test_session.py::TestSessionSubmit -v
+uv run pytest tests/test_session.py -v
+uv run pytest tests/test_session_methods.py -v
+uv run pytest tests/test_dataset_view_methods.py -v
 ```
 
 Test file mapping:
 
 | File | Target |
 |----------|------|
-| `test_session.py` | Session API · end-to-end |
+| `test_session.py` | Session integration / end-to-end scenarios |
+| `test_session_methods.py` | Session method-focused scenarios (`load`, `select`, `sort`, `sql`, etc.) |
+| `test_dataset_view_methods.py` | DatasetView method-focused scenarios and chaining |
 | `test_submit.py` | submit/run convenience functions |
 | `test_runtime.py` | PDV runtime service |
 | `test_parser.py` | Parser |
@@ -158,9 +174,13 @@ uv run sphinx-build -b html . _build/html
 
 ### When modifying `limulus/executor.py` or `limulus/executor_python.py`
 - `executor.py` contains `DataStepExecutor`: orchestration, backend selection, I/O resolution, multi-block coordination
-- `executor_python.py` contains `PythonBackendExecutionService`: complete row-level PDV loop for the Python backend
+- `executor_python.py` contains `PythonBackendExecutionService`: Python backend entry point and high-level row-loop orchestration
+- `executor_py_stage.py` contains Python-backend pipeline stages such as input preparation and execution-mode dispatch
+- `executor_py_stmt.py` contains statement/block execution helpers (`IF`, `DO`, `ARRAY`, `SUM`, `ASSIGN`, etc.)
+- `executor_py_data.py` contains source dataset option handling and `SET` / `MERGE` row-building helpers
 - Prefer pipeline-level post-processing for cross-backend behavior (e.g. internal temporary variable filtering)
-- When adding new statement types or row-processing logic, changes typically go in `executor_python.py`
+- When adding new statement types or row-processing logic, changes typically go in `executor_py_stmt.py`
+- When adjusting source-row preparation or SET/MERGE behavior, changes typically go in `executor_py_stage.py` or `executor_py_data.py`
 - When modifying backend selection or I/O handling, changes go in `executor.py`
 - Always verify with `uv run pytest` after changes to either file
 

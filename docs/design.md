@@ -86,6 +86,8 @@ To improve execution speed, a Rust-based runtime module is provided.
 The Rust backend is used by default.  
 However, if a diagnostic error occurs for cases that cannot be handled by the Rust backend (e.g., `apply()`), the Python backend is automatically used as a fallback.
 
+Input-stage dataset options such as `keep=`, `drop=`, `where=`, `rename=`, `firstobs=`, and `obs=` are normalized in shared Python-side preprocessing before the runtime loop when needed. This keeps the row-loop semantics consistent across Python and Rust backends without duplicating the same preparation rules in multiple runtimes.
+
 ### 5. Row Loop Processing
 Manages the basic per-row loop processing and its associated automatic variables.
 
@@ -102,6 +104,8 @@ This allows `session["name"]` to be retrieved as an Arrow Table.
 
 In the output stage, internal temporary variables are also removed in a backend-agnostic way.
 This includes helper variables created by `IN=`, `INDSNAME=`, `END=`, and `FIRST./LAST.` (including renamed aliases).
+
+Dataset labels are stored in Arrow schema metadata under `memlabel`, and column labels are stored in each Arrow field's custom metadata. This allows label information produced by `DATA ... (label="...")` and `LABEL` statements to survive round-trips through `Session`.
 
 ### 7. Stage-aware Diagnostics and Logs
 
@@ -171,6 +175,7 @@ Compared with column-oriented processing in pandas or polars, limulus is at a di
 
 1. Improved reliability through expanded and organized test coverage
 2. Enhanced logging and debugging capabilities
+3. Support for Dataset-JSON
 
 ### Long-term (TBD)
 

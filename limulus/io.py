@@ -7,6 +7,34 @@ from .io_adapters import DataFrameAdapterPandas, DataInputAdapterArrow, DataOutp
 from .models import DataSetRef, Diagnostic, ExecuteResponse, OutputConversionResult
 
 
+def _apply_arrow_metadata(table: Any, metadata: Mapping[str, Any]) -> Any:
+    if not metadata:
+        return table
+
+    dataset_label = metadata.get("memlabel") or metadata.get("dataset_label")
+    column_labels = metadata.get("column_labels") or {}
+    if not dataset_label and not column_labels:
+        return table
+
+    schema = table.schema
+    schema_metadata = dict(schema.metadata or {})
+    if dataset_label:
+        schema_metadata[b"memlabel"] = str(dataset_label).encode("utf-8")
+
+    fields = []
+    for field in schema:
+        field_metadata = dict(field.metadata or {})
+        label = column_labels.get(field.name)
+        if label:
+            field_metadata[b"label"] = str(label).encode("utf-8")
+        fields.append(field.with_metadata(field_metadata or None))
+
+    import pyarrow as pa
+
+    updated_schema = pa.schema(fields, metadata=schema_metadata or None)
+    return pa.Table.from_arrays([table.column(index) for index in range(table.num_columns)], schema=updated_schema)
+
+
 class ExecutorIOService:
     def __init__(
         self,
@@ -58,14 +86,14 @@ class ExecutorIOService:
     ) -> tuple[Any | None, Diagnostic | None]:
         try:
             if dataset_ref.kind == "arrow_table" and hasattr(dataset_ref.payload, "to_pylist"):
-                return dataset_ref.payload, None
+                return _apply_arrow_metadata(dataset_ref.payload, dataset_ref.metadata), None
 
             if isinstance(dataset_ref.payload, Sequence) and not isinstance(dataset_ref.payload, (str, bytes, bytearray)):
                 stored = self._arrow_output.store(
                     dataset_ref.payload,
                     OutputSpec(format="arrow_table", location=f"memory://{dataset_name}"),
                 )
-                return stored.payload, None
+                return _apply_arrow_metadata(stored.payload, dataset_ref.metadata), None
 
             return None, Diagnostic(
                 code="CONVERT_OUTPUT_FAILED",

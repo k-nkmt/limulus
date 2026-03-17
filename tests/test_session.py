@@ -37,44 +37,6 @@ SESSION_SCENARIOS = {
         """,
         "expected_rows": [{"id": 1, "amount": 3}],
     },
-    "column_api_select_rename_filter": {
-        "overview": "filter/select/rename chain keeps positive rows and renames amount to amt",
-        "inputs": {
-            "inp": {
-                "id": [1, 2, 3],
-                "amount": [10, -1, 30],
-                "name": ["Alice", "Bob", "Catherine"],
-            }
-        },
-        "expected_output": [{"id": 1, "amt": 10}, {"id": 3, "amt": 30}],
-    },
-    "apply_dataset_options": {
-        "overview": "apply_dataset_options enforces where/keep/drop/rename in one call",
-        "inputs": {
-            "src": {
-                "id": [1, 2, 3],
-                "amount": [10, -1, 30],
-                "tmp": ["a", "b", "c"],
-            }
-        },
-        "expected_output": [{"id": 1, "amt": 10}, {"id": 3, "amt": 30}],
-    },
-    "loads_unload_delete_alias": {
-        "overview": "loads registers multiple datasets and unload/delete remove them from catalog",
-        "inputs": {"a": {"id": [1]}, "b": {"id": [2]}, "c": {"id": [3]}},
-    },
-    "step_style_and_dataset_view": {
-        "overview": "where/keep/drop/rename step-style APIs and dataset view chaining return expected rows",
-        "inputs": {
-            "inp": {
-                "id": [1, 2, 3],
-                "amount": [10, -1, 30],
-                "name": ["Alice", "Bob", "Catherine"],
-            }
-        },
-        "expected_output": [{"id": 1, "amt": 10}, {"id": 3, "amt": 30}],
-        "expected_view_rows": [{"id": 1, "amount": 10}, {"id": 3, "amount": 30}],
-    },
     "if_then_do_else_do": {
         "overview": "IF/ELSE DO routes rows exclusively into age1/age2 outputs",
         "inputs": {
@@ -158,7 +120,7 @@ SESSION_SCENARIOS = {
     "acceptance_merge_option_chain": {
         "overview": "SET dataset options, INDSNAME/END and keep chain retain only final qualifying row",
         "dsl": (
-            "data out; set in(keep=id amount tmp drop=tmp rename=(amount=amt) where=(amt >= 10) in=in_flag) "
+            "data out; set in(keep=id amount tmp drop=tmp where=(amount >= 10) rename=(amount=amt) in=in_flag) "
             "indsname=src end=last; if in_flag and last then output out; keep id amt src last; run;"
         ),
         "inputs": [{"id": 1, "amount": 5, "tmp": "a"}, {"id": 2, "amount": 10, "tmp": "b"}],
@@ -283,13 +245,17 @@ SESSION_SCENARIOS = {
         output out;
         run;
         """,
-        "expected_skip_count": 5,
+        "expected_skip_count": 4,
     },
     "acceptance_dataset_options_order": {
-        "overview": "SET options apply in keep/drop/rename/where order and preserve final row shape",
-        "dsl": "data out; set in(keep=id amount tmp drop=tmp rename=(amount=amt) where=(amt > 10)); output out; run;",
-        "inputs": [{"id": 1, "amount": 5, "tmp": "x"}, {"id": 2, "amount": 20, "tmp": "y"}],
-        "expected_output": [{"id": 2, "amt": 20}],
+        "overview": "SET options apply in keep/drop, where, rename, obs/firstobs order and preserve final row shape",
+        "dsl": "data out; set in(keep=id amount tmp drop=tmp where=(amount > 10) rename=(amount=amt) firstobs=2 obs=1); output out; run;",
+        "inputs": [
+            {"id": 1, "amount": 5, "tmp": "x"},
+            {"id": 2, "amount": 20, "tmp": "y"},
+            {"id": 3, "amount": 30, "tmp": "z"},
+        ],
+        "expected_output": [{"id": 3, "amt": 30}],
     },
     "acceptance_set_statement_options": {
         "overview": "SET statement-level INDSNAME/END options are evaluated across concatenated inputs",
@@ -297,6 +263,32 @@ SESSION_SCENARIOS = {
         "inputs_a": [{"id": 1}],
         "inputs_b": [{"id": 2}, {"id": 3}],
         "expected_output": [{"id": 3}],
+    },
+    "acceptance_merge_end_statement_option": {
+        "overview": "MERGE statement END= is accepted and marks the final merged row",
+        "dsl": "data out; merge a b end=eof; by id; if eof then output out; keep id eof; run;",
+        "inputs_a": [{"id": 1}, {"id": 2}],
+        "inputs_b": [{"id": 2}, {"id": 3}],
+        "expected_output": [{"id": 3}],
+    },
+    "label_metadata": {
+        "overview": "Dataset and column labels are preserved in Arrow metadata",
+        "dsl": '''
+        data dm(label="DM");
+        set inp;
+        label id = "Identifier" amount = "Amount";
+        output dm;
+        run;
+        ''',
+        "inputs": {"id": [1], "amount": [10]},
+    },
+    "astype": {
+        "overview": "DatasetView.astype converts columns through polars",
+        "inputs": {"id": [1, 2], "amount": ["10", "20"]},
+    },
+    "sql": {
+        "overview": "Session.sql returns Arrow output and can save into the session catalog via CREATE TABLE",
+        "inputs": {"id": [1, 2, 3], "amount": [5, 20, 30]},
     },
     "acceptance_set_by_rename_internal_excluded": {
         "overview": "BY + rename output excludes internal helper variables and keeps renamed value",
@@ -839,92 +831,6 @@ def test_session_to_arrow_and_to_pandas() -> None:
     assert out_pandas.to_dict(orient="records") == scenario["expected_rows"]
 
 
-def test_session_column_api_select_rename_filter() -> None:
-    scenario = SESSION_SCENARIOS["column_api_select_rename_filter"]
-    session = Session()
-    session.load("inp", pa.table(scenario["inputs"]["inp"]))
-
-    session.filter("inp", "amount > 0", target="flt")
-    session.select("flt", ["id", "amount"], target="sel")
-    session.rename("sel", {"amount": "amt"}, target="out")
-
-    assert session["out"].to_pylist() == scenario["expected_output"]
-
-
-def test_session_column_api_apply_dataset_options() -> None:
-    scenario = SESSION_SCENARIOS["apply_dataset_options"]
-    session = Session()
-    session.load("src", pa.table(scenario["inputs"]["src"]))
-
-    session.apply_dataset_options(
-        "src",
-        where="amount > 0",
-        keep=["id", "amount", "tmp"],
-        drop=["tmp"],
-        rename={"amount": "amt"},
-        target="out",
-    )
-
-    assert session["out"].to_pylist() == scenario["expected_output"]
-
-
-def test_session_loads_and_unload_delete_alias() -> None:
-    scenario = SESSION_SCENARIOS["loads_unload_delete_alias"]
-    session = Session()
-    session.loads(
-        {
-            "a": pa.table(scenario["inputs"]["a"]),
-            "b": pa.table(scenario["inputs"]["b"]),
-        }
-    )
-    session.loads(c=pa.table(scenario["inputs"]["c"]))
-
-    assert "a" in session.datasets
-    assert "b" in session.datasets
-    assert "c" in session.datasets
-
-    removed = session.unload("a")
-    assert removed is True
-    assert "a" not in session.datasets
-
-    removed_alias = session.delete("b")
-    assert removed_alias is True
-    assert "b" not in session.datasets
-
-
-def test_session_unload_accepts_sequence_names() -> None:
-    scenario = SESSION_SCENARIOS["loads_unload_delete_alias"]
-    session = Session()
-    session.loads(
-        {
-            "a": pa.table(scenario["inputs"]["a"]),
-            "b": pa.table(scenario["inputs"]["b"]),
-            "c": pa.table(scenario["inputs"]["c"]),
-        }
-    )
-
-    removed = session.unload(["a", "b"])
-    assert removed is True
-    assert "a" not in session.datasets
-    assert "b" not in session.datasets
-    assert "c" in session.datasets
-
-
-def test_session_step_style_methods_and_dataset_view() -> None:
-    scenario = SESSION_SCENARIOS["step_style_and_dataset_view"]
-    session = Session()
-    session.load("inp", pa.table(scenario["inputs"]["inp"]))
-
-    session.where("inp", "amount > 0", target="flt")
-    session.keep("flt", ["id", "amount", "name"], target="k")
-    session.drop("k", ["name"], target="d")
-    session.rename("d", {"amount": "amt"}, target="out")
-    assert session["out"].to_pylist() == scenario["expected_output"]
-
-    chained = session.dataset("inp").where("amount > 0", target="v1").keep(["id", "amount"], target="v2")
-    assert chained.to_arrow().to_pylist() == scenario["expected_view_rows"]
-
-
 def test_if_then_do_else_do_routes_rows_exclusively() -> None:
     scenario = SESSION_SCENARIOS["if_then_do_else_do"]
     session = Session()
@@ -1392,6 +1298,24 @@ def test_session_acceptance_set_statement_options_indsname_and_end() -> None:
     assert response.outputs["out"].payload == scenario["expected_output"]
 
 
+def test_session_acceptance_merge_statement_end_option() -> None:
+    scenario = SESSION_SCENARIOS["acceptance_merge_end_statement_option"]
+    executor = DataStepExecutor(runtime_backend="python", parser_backend="python")
+    response = executor.execute(
+        ExecuteRequest(
+            dsl_text=scenario["dsl"],
+            inputs={
+                "a": DataSetRef(kind="memory", location="dataset://a", payload=scenario["inputs_a"]),
+                "b": DataSetRef(kind="memory", location="dataset://b", payload=scenario["inputs_b"]),
+            },
+            output_targets=["out"],
+        )
+    )
+
+    assert response.has_errors is False
+    assert response.outputs["out"].payload == scenario["expected_output"]
+
+
 def test_session_acceptance_set_by_rename_excludes_internal_variables() -> None:
     scenario = SESSION_SCENARIOS["acceptance_set_by_rename_internal_excluded"]
     executor = DataStepExecutor(runtime_backend="python", parser_backend="python")
@@ -1411,6 +1335,35 @@ def test_session_acceptance_set_by_rename_excludes_internal_variables() -> None:
 
     assert response.has_errors is False
     assert response.outputs["out"].payload == scenario["expected_output"]
+
+
+def test_session_preserves_dataset_and_column_labels_in_arrow_metadata() -> None:
+    scenario = SESSION_SCENARIOS["label_metadata"]
+    session = Session(runtime_backend="python", parser_backend="python")
+    session.load("inp", pa.table(scenario["inputs"]))
+
+    result = session.submit(scenario["dsl"])
+
+    assert result.success is True
+    table = session.to_arrow("dm")
+    assert table.schema.metadata[b"memlabel"] == b"DM"
+    assert table.schema.field("id").metadata[b"label"] == b"Identifier"
+    assert table.schema.field("amount").metadata[b"label"] == b"Amount"
+
+
+def test_session_label_metadata_is_preserved_with_rust_runtime() -> None:
+    scenario = SESSION_SCENARIOS["label_metadata"]
+    session = Session(runtime_backend="rust", parser_backend="python")
+    session.load("inp", pa.table(scenario["inputs"]))
+
+    result = session.submit(scenario["dsl"])
+
+    assert result.success is True
+    assert session._executor.last_runtime_backend == "rust"
+    table = session.to_arrow("dm")
+    assert table.schema.metadata[b"memlabel"] == b"DM"
+    assert table.schema.field("id").metadata[b"label"] == b"Identifier"
+    assert table.schema.field("amount").metadata[b"label"] == b"Amount"
 
 
 def test_session_acceptance_subset_if_matches_if_not_then_delete() -> None:

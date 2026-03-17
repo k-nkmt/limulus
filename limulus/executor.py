@@ -27,6 +27,7 @@ from .parser import (
     ParserService,
     PythonParserBackend,
     RustNativeParserBackend,
+    SetStatementOptionSpec,
 )
 from .runtime import PDVRuntimeService, ProgramExecutionService
 from .executor_python import PythonBackendExecutionService
@@ -316,6 +317,10 @@ class ExecutionPipelineCoordinator:
                     )
                 )
             execution_outputs = output_stage_outputs
+            execution_outputs = self._executor._apply_output_metadata(
+                ast_statements=ast_statements,
+                outputs=execution_outputs,
+            )
 
             for name, dataset in execution_outputs.items():
                 combined_outputs[name] = dataset
@@ -551,7 +556,24 @@ class DataStepExecutor:
                 current_inputs, by_keys_for_sort
             )
 
-        if self._runtime_backend_preference.strip().lower() == "python":
+        should_prepare_set_rows = self._runtime_backend_preference.strip().lower() == "python"
+        if not should_prepare_set_rows:
+            set_stmt = next((s for s in ast_statements if s.kind == "SET"), None)
+            source_refs = list(getattr(set_stmt, "dataset_refs", ()) or ()) if set_stmt is not None else []
+            should_prepare_set_rows = bool(
+                source_refs
+                and any(
+                    ref.options.keep_vars
+                    or ref.options.drop_vars
+                    or ref.options.rename_map
+                    or ref.options.where_expr
+                    or getattr(ref.options, "firstobs", None) is not None
+                    or getattr(ref.options, "obs", None) is not None
+                    for ref in source_refs
+                )
+            )
+
+        if should_prepare_set_rows:
             prepared_inputs, prepare_error = self._prepare_set_rows_with_temporary_variables(
                 ast_statements=ast_statements,
                 resolved_inputs=current_inputs,
@@ -605,6 +627,7 @@ class DataStepExecutor:
                         kind=dataset_ref.kind,
                         location=dataset_ref.location,
                         payload=filtered_rows,
+                        metadata=dataset_ref.metadata,
                     )
                     continue
                 filtered[target] = dataset_ref
@@ -634,6 +657,7 @@ class DataStepExecutor:
                         kind="arrow_table",
                         location=dataset_ref.location,
                         payload=filtered_table,
+                        metadata=dataset_ref.metadata,
                     )
                 except Exception as error:
                     diagnostics.append(
@@ -650,6 +674,42 @@ class DataStepExecutor:
             filtered[target] = dataset_ref
 
         return filtered, diagnostics
+
+    def _apply_output_metadata(
+        self,
+        *,
+        ast_statements: Sequence[Any],
+        outputs: Mapping[str, DataSetRef],
+    ) -> dict[str, DataSetRef]:
+        data_statement = next((statement for statement in ast_statements if statement.kind == "DATA"), None)
+        label_statement = next((statement for statement in ast_statements if statement.kind == "LABEL"), None)
+        if data_statement is None and label_statement is None:
+            return dict(outputs)
+
+        column_labels = dict(getattr(label_statement, "label_map", {}))
+        dataset_labels: dict[str, str] = {}
+        if data_statement is not None:
+            for output_ref in getattr(data_statement, "output_refs", ()):
+                label = getattr(getattr(output_ref, "options", None), "label", None)
+                if label:
+                    dataset_labels[self._dataset_name_key(output_ref.name)] = label
+
+        updated: dict[str, DataSetRef] = {}
+        for target, dataset_ref in outputs.items():
+            metadata = dict(dataset_ref.metadata)
+            dataset_label = dataset_labels.get(self._dataset_name_key(target))
+            if dataset_label:
+                metadata["memlabel"] = dataset_label
+            if column_labels:
+                metadata["column_labels"] = dict(column_labels)
+            updated[target] = DataSetRef(
+                kind=dataset_ref.kind,
+                location=dataset_ref.location,
+                payload=dataset_ref.payload,
+                metadata=metadata,
+            )
+
+        return updated
 
     def _collect_internal_output_variable_names(
         self,
@@ -788,6 +848,7 @@ class DataStepExecutor:
             kind="SET",
             text=f"set {first_source_name}",
             dataset_refs=(DatasetReference(name=first_source_name),),
+            statement_options=getattr(merge_statement, "statement_options", SetStatementOptionSpec()),
         )
         updated_statements = tuple(
             replacement_statement if statement is merge_statement else statement
@@ -926,7 +987,24 @@ class DataStepExecutor:
         ]
         indsname_var = set_stmt.statement_options.indsname_var
         end_var = set_stmt.statement_options.end_var
-        needs_prepare = bool(in_option_vars or indsname_var or end_var or by_keys or has_lag_lead)
+        runtime_backend = self._runtime_backend_preference.strip().lower()
+        has_source_dataset_options = any(
+            ref.options.keep_vars
+            or ref.options.drop_vars
+            or ref.options.rename_map
+            or ref.options.where_expr
+            or getattr(ref.options, "firstobs", None) is not None
+            or getattr(ref.options, "obs", None) is not None
+            for ref in source_refs
+        )
+        needs_prepare = bool(
+            in_option_vars
+            or indsname_var
+            or end_var
+            or by_keys
+            or has_lag_lead
+            or (runtime_backend in {"rust", "auto"} and has_source_dataset_options)
+        )
         if not needs_prepare:
             return None, None
 
@@ -1058,6 +1136,8 @@ class DataStepExecutor:
             and not option_spec.drop_vars
             and not option_spec.rename_map
             and not option_spec.where_expr
+            and getattr(option_spec, "firstobs", None) is None
+            and getattr(option_spec, "obs", None) is None
         ):
             return list(rows), None
 
@@ -1081,6 +1161,20 @@ class DataStepExecutor:
                 drop_set = set(option_spec.drop_vars)
                 working = {name: value for name, value in working.items() if name not in drop_set}
 
+            if option_spec.where_expr:
+                try:
+                    passes = bool(eval(option_spec.where_expr, {"__builtins__": {}}, dict(working)))
+                except Exception as error:
+                    return [], Diagnostic(
+                        code="RUNTIME_DATASET_OPTION_INVALID",
+                        severity="error",
+                        message=(
+                            f"Dataset option WHERE= evaluation failed for source '{source_name}': {error}"
+                        ),
+                    )
+                if not passes:
+                    continue
+
             if option_spec.rename_map:
                 renamed_row: dict[str, Any] = {}
                 for key, value in working.items():
@@ -1097,21 +1191,26 @@ class DataStepExecutor:
                         )
                 working = renamed_row
 
-            if option_spec.where_expr:
-                try:
-                    passes = bool(eval(option_spec.where_expr, {"__builtins__": {}}, dict(working)))
-                except Exception as error:
-                    return [], Diagnostic(
-                        code="RUNTIME_DATASET_OPTION_INVALID",
-                        severity="error",
-                        message=(
-                            f"Dataset option WHERE= evaluation failed for source '{source_name}': {error}"
-                        ),
-                    )
-                if not passes:
-                    continue
-
             processed.append(working)
+
+        firstobs = getattr(option_spec, "firstobs", None)
+        obs = getattr(option_spec, "obs", None)
+        if firstobs is not None and firstobs <= 0:
+            return [], Diagnostic(
+                code="RUNTIME_DATASET_OPTION_INVALID",
+                severity="error",
+                message=f"Dataset option FIRSTOBS= must be positive for source '{source_name}'.",
+            )
+        if obs is not None and obs < 0:
+            return [], Diagnostic(
+                code="RUNTIME_DATASET_OPTION_INVALID",
+                severity="error",
+                message=f"Dataset option OBS= must be non-negative for source '{source_name}'.",
+            )
+        start_index = max((firstobs or 1) - 1, 0)
+        processed = processed[start_index:]
+        if obs is not None:
+            processed = processed[:obs]
 
         return processed, None
 

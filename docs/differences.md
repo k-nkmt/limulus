@@ -30,6 +30,17 @@ Complex types such as structs that do not exist in SAS are not expected to be us
 
 ## Behavioral Differences
 
+### Labels
+Dataset labels and column labels are supported, but they are stored as Arrow metadata rather than as a separate display-layer construct. Dataset labels live in schema metadata under `memlabel`, and column labels live in per-field custom metadata.
+
+### Dataset Option Type Preservation
+Some row-oriented execution paths materialize rows before the final Arrow table is rebuilt. As a current limitation, Arrow physical types are not always preserved exactly after `SET`-based processing, including cases that use source dataset options such as `firstobs=` or `obs=`. The logical values are preserved, but numeric columns may be widened, for example from `float32` to `float64`.
+
+If exact physical types matter, it is recommended to perform type conversion at the final materialized output stage. In practice, prefer `DatasetView.cast(...)` or `DatasetView.astype(...)` as the last transformation before using the result.
+
+### SQL API
+`Session.sql()` is available for read-oriented queries and `CREATE TABLE ... AS ...` style result persistence. The feature is backed by the Polars SQL engine and is intended as a practical session-level query helper rather than a full PROC SQL reimplementation.
+
 ### length
 Character length is variable by default, so no character truncation occurs.
 
@@ -88,7 +99,7 @@ Useful for extending functionality not covered by limulus's built-in functions, 
 
 | SAS language Feature | Notes |
 |---------|------|
-| Label / Attrib | Planned for future implementation |
+| Attrib | Full ATTRIB parity is not implemented yet; use dataset labels and LABEL statements for supported metadata cases |
 | Data transposition | Handle on the Python side; `retain` workaround available; `transpose` API planned separately |
 | Numeric format (`PUT(x, 8.2)`) | Planned for future implementation; `apply` can be used as a workaround |
 | Format (`FORMAT`, `INFORMAT`) | Handle with if statements and merge; to be revisited |
@@ -117,6 +128,7 @@ Column reordering can be done with `select` or `keep`.
 ```python
 session.dataset("ds").sort("x")
 session.dataset("ds").sort(["x", "y"])
+session.dataset("ds").sort(["x"], nodupkey=True)
 session.dataset("ds").sort([("x", "Ascending"),("y", "Descending")])
 
 session.dataset("ds").select(["x","y"])

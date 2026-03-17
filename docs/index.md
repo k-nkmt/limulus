@@ -17,6 +17,7 @@ quickstart
 example
 design
 differences
+changelog
 ```
 
 ```{toctree}
@@ -37,7 +38,7 @@ api
 - [Differences from SAS language](differences.md)
 - [Syntax Reference](syntax.md)
 - [API Reference](api.md)
-
+- [Changelog](changelog.md)
 
 
 ## License

@@ -2,6 +2,7 @@
 
 A reference for the Data Step statements supported by limulus.  
 For differences from SAS language, see [Differences from SAS language](differences.md).
+For Column-Oriented API and Ssession-level helpers such as `sort`, `sql` and `include`,  see [API Reference](api.md) and [Changelog](changelog.md).
 
 ---
 

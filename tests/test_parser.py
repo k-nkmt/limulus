@@ -31,16 +31,21 @@ PARSER_SCENARIOS = {
         "overview": "Parses interleaved dataset options and SET statement options via parser structure",
         "dsl": (
             "data out; "
-            "set in_a(keep=id amount drop=tmp rename=(amount=amt) where=(amt > 0)) "
+            "set in_a(keep=id amount drop=tmp where=(amount > 0) rename=(amount=amt)) "
             "in_b(in=in_right keep=id) "
             "indsname=src end=eof ; "
             "run;"
         ),
     },
+    "merge_end_statement_option": {
+        "overview": "Parses END= as a MERGE statement option",
+        "dsl": "data out; merge a b end=eof; by id; run;",
+    },
     "invalid_option_scope": {
         "overview": "Returns PARSE_SET_OPTION_SCOPE_ERROR when option scope is invalid",
         "dsl_in_statement_scope": "data out; set in_a in=in_left; run;",
         "dsl_indsname_dataset_scope": "data out; set in_a(indsname=src); run;",
+        "dsl_merge_indsname_statement_scope": "data out; merge in_a indsname=src; by id; run;",
     },
     "set_multiple_inputs_delete": {
         "overview": "Parses SET with multiple inputs and DELETE statement",
@@ -50,11 +55,15 @@ PARSER_SCENARIOS = {
     },
     "dataset_options_where_rename_keep_drop": {
         "overview": "Parses KEEP/DROP/RENAME/WHERE dataset options",
-        "dsl": "data out; set in(keep=id amount drop=tmp rename=(amount=amt) where=(amt > 0)); run;",
+        "dsl": "data out; set in(keep=id amount drop=tmp where=(amount > 0) rename=(amount=amt) firstobs=2 obs=3); run;",
     },
     "data_output_dataset_options": {
         "overview": "Parses DATA statement output dataset options",
-        "dsl": "data a(keep=id) b(drop=tmp rename=(name=full_name)); set in; run;",
+        "dsl": "data a(keep=id label=\"A\") b(drop=tmp rename=(name=full_name)); set in; run;",
+    },
+    "data_and_label_statements": {
+        "overview": "Parses DATA label option and LABEL statement mappings",
+        "dsl": 'data dm(label="DM"); set inp; label id = "Identifier" amount = "Amount"; run;',
     },
     "rename_statement": {
         "overview": "Parses RENAME statement mapping",
@@ -212,7 +221,7 @@ class ParserServiceTests(unittest.TestCase):
         self.assertEqual(first_options.keep_vars, ("id", "amount"))
         self.assertEqual(first_options.drop_vars, ("tmp",))
         self.assertEqual(first_options.rename_map, {"amount": "amt"})
-        self.assertEqual(first_options.where_expr, "amt > 0")
+        self.assertEqual(first_options.where_expr, "amount > 0")
 
         second_options = set_statement.dataset_refs[1].options
         self.assertEqual(second_options.in_var, "in_right")
@@ -222,15 +231,29 @@ class ParserServiceTests(unittest.TestCase):
         scenario = PARSER_SCENARIOS["invalid_option_scope"]
         with_in_as_statement_option = scenario["dsl_in_statement_scope"]
         with_indsname_as_dataset_option = scenario["dsl_indsname_dataset_scope"]
+        with_merge_indsname_as_statement_option = scenario["dsl_merge_indsname_statement_scope"]
 
         result_in = self.parser.parse(with_in_as_statement_option)
         result_inds = self.parser.parse(with_indsname_as_dataset_option)
+        result_merge_inds = self.parser.parse(with_merge_indsname_as_statement_option)
 
         self.assertTrue(result_in.has_errors)
         self.assertEqual(result_in.diagnostics[0].code, "PARSE_UNSUPPORTED_STATEMENT")
         self.assertTrue(result_inds.has_errors)
         self.assertEqual(result_inds.diagnostics[0].code, "PARSE_SET_OPTION_SCOPE_ERROR")
         self.assertIn("INDSNAME=", result_inds.diagnostics[0].message)
+        self.assertTrue(result_merge_inds.has_errors)
+        self.assertEqual(result_merge_inds.diagnostics[0].code, "PARSE_SET_OPTION_SCOPE_ERROR")
+
+    def test_parses_merge_end_statement_option(self) -> None:
+        scenario = PARSER_SCENARIOS["merge_end_statement_option"]
+
+        result = self.parser.parse(scenario["dsl"])
+
+        self.assertFalse(result.has_errors)
+        merge_statement = next(statement for statement in result.ast.statements if statement.kind == "MERGE")
+        self.assertEqual(tuple(ref.name for ref in merge_statement.dataset_refs), ("a", "b"))
+        self.assertEqual(merge_statement.statement_options.end_var, "eof")
 
     def test_parses_set_multiple_inputs_and_delete_statement(self) -> None:
         scenario = PARSER_SCENARIOS["set_multiple_inputs_delete"]
@@ -258,7 +281,9 @@ class ParserServiceTests(unittest.TestCase):
         self.assertEqual(options.keep_vars, ("id", "amount"))
         self.assertEqual(options.drop_vars, ("tmp",))
         self.assertEqual(options.rename_map, {"amount": "amt"})
-        self.assertEqual(options.where_expr, "amt > 0")
+        self.assertEqual(options.where_expr, "amount > 0")
+        self.assertEqual(options.firstobs, 2)
+        self.assertEqual(options.obs, 3)
 
     def test_parses_data_output_dataset_options(self) -> None:
         scenario = PARSER_SCENARIOS["data_output_dataset_options"]
@@ -270,8 +295,21 @@ class ParserServiceTests(unittest.TestCase):
         data_statement = next(statement for statement in result.ast.statements if statement.kind == "DATA")
         self.assertEqual(tuple(ref.name for ref in data_statement.dataset_refs), ("a", "b"))
         self.assertEqual(data_statement.dataset_refs[0].options.keep_vars, ("id",))
+        self.assertEqual(data_statement.dataset_refs[0].options.label, "A")
         self.assertEqual(data_statement.dataset_refs[1].options.drop_vars, ("tmp",))
         self.assertEqual(data_statement.dataset_refs[1].options.rename_map, {"name": "full_name"})
+
+    def test_parses_data_label_option_and_label_statement(self) -> None:
+        scenario = PARSER_SCENARIOS["data_and_label_statements"]
+
+        result = self.parser.parse(scenario["dsl"])
+
+        self.assertFalse(result.has_errors)
+        data_statement = next(statement for statement in result.ast.statements if statement.kind == "DATA")
+        label_statement = next(statement for statement in result.ast.statements if statement.kind == "LABEL")
+
+        self.assertEqual(data_statement.dataset_refs[0].options.label, "DM")
+        self.assertEqual(label_statement.label_map, {"id": "Identifier", "amount": "Amount"})
 
     def test_parses_rename_statement(self) -> None:
         scenario = PARSER_SCENARIOS["rename_statement"]
@@ -368,7 +406,9 @@ class ParserServiceTests(unittest.TestCase):
 
         self.assertFalse(result.has_errors)
         skipped = [statement for statement in result.ast.statements if statement.kind == "SKIPPED"]
-        self.assertEqual(len(skipped), 5)
+        self.assertEqual(len(skipped), 4)
+        labels = [statement for statement in result.ast.statements if statement.kind == "LABEL"]
+        self.assertEqual(len(labels), 1)
 
     def test_parses_call_statement_as_skipped(self) -> None:
         scenario = PARSER_SCENARIOS["call_statement_as_skipped"]

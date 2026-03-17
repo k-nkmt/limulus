@@ -10,6 +10,7 @@ class DataSetRef:
     kind: str
     location: str
     payload: Any | None = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -34,6 +35,7 @@ class ExecuteRequest:
     dsl_text: str
     inputs: Mapping[str, DataSetRef] = field(default_factory=dict)
     output_targets: tuple[str, ...] = field(default_factory=tuple)
+    options: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
