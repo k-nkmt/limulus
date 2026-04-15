@@ -4,6 +4,7 @@ import re
 from collections.abc import Mapping
 from typing import Any, Callable
 
+from ._naming import _column_key
 from .models import Diagnostic
 
 
@@ -125,6 +126,9 @@ class ExpressionEvaluator:
             self._transformed_expression_cache[transform_cache_key] = transformed
 
         scope = dict(row)
+        for column_name, value in row.items():
+            scope.setdefault(_column_key(column_name), value)
+            scope.setdefault(column_name.lower(), value)
         scope["_N_"] = context.get_variable("_N_")
         scope["_ERROR_"] = context.get_variable("_ERROR_")
         scope["_n_"] = context.get_variable("_N_")

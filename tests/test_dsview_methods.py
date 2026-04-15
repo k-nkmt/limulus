@@ -70,6 +70,48 @@ DATASET_VIEW_METHOD_SCENARIOS = {
         "expected_amount_label": b"Amount",
         "expected_type": pa.int64(),
     },
+    "transpose": {
+        "overview": "DatasetView.transpose materializes the wide result through out=",
+        "inputs": {
+            "src": {
+                "grp": ["a", "a", "b"],
+                "visit": ["v1", "v2", "v1"],
+                "score": [10, 20, 30],
+            }
+        },
+        "expected_name": "wide_scores",
+        "expected_output": [
+            {"grp": "a", "v1": 10, "v2": 20},
+            {"grp": "b", "v1": 30, "v2": None},
+        ],
+    },
+    "assign": {
+        "overview": "DatasetView.assign supports chained column creation using out=",
+        "inputs": {
+            "src": {
+                "name": ["Alice", "Bob"],
+                "weight": [50.0, 80.0],
+                "height_m": [1.60, 1.80],
+            }
+        },
+        "expected_name": "scored",
+        "expected_output": [
+            {
+                "name": "Alice",
+                "weight": 50.0,
+                "height_m": 1.60,
+                "name_up": "ALICE",
+                "bmi": 19.53,
+            },
+            {
+                "name": "Bob",
+                "weight": 80.0,
+                "height_m": 1.80,
+                "name_up": "BOB",
+                "bmi": 24.69,
+            },
+        ],
+    },
 }
 
 
@@ -152,3 +194,37 @@ def test_dataset_view_cast_preserves_arrow_metadata_after_polars_roundtrip() -> 
     assert table.schema.field("id").metadata[b"label"] == scenario["expected_id_label"]
     assert table.schema.field("amount").metadata[b"label"] == scenario["expected_amount_label"]
     assert table.column("amount").type == scenario["expected_type"]
+
+
+def test_dataset_view_transpose_uses_out_parameter() -> None:
+    scenario = DATASET_VIEW_METHOD_SCENARIOS["transpose"]
+    session = Session()
+    session.load("src", pa.table(scenario["inputs"]["src"]))
+
+    view = session.dataset("src").transpose(by=["grp"], id="visit", var=["score"], out="wide_scores")
+
+    assert view.name == scenario["expected_name"]
+    assert view.to_arrow().to_pylist() == scenario["expected_output"]
+
+
+def test_dataset_view_transpose_rejects_sequence_id_arguments() -> None:
+    session = Session()
+    session.load("src", pa.table({"grp": ["a"], "visit": ["v1"], "score": [10]}))
+
+    with pytest.raises(TypeError, match="single column name"):
+        session.dataset("src").transpose(by=["grp"], id=["visit"], var=["score"], out="wide_scores")
+
+
+def test_dataset_view_assign_uses_out_parameter_and_left_to_right_evaluation() -> None:
+    scenario = DATASET_VIEW_METHOD_SCENARIOS["assign"]
+    session = Session()
+    session.load("src", pa.table(scenario["inputs"]["src"]))
+
+    view = session.dataset("src").assign(
+        out="scored",
+        name_up="upcase(name)",
+        bmi="round(weight / (height_m * height_m), 0.01)",
+    )
+
+    assert view.name == scenario["expected_name"]
+    assert view.to_arrow().to_pylist() == scenario["expected_output"]

@@ -69,6 +69,26 @@ You can convert it to pandas using Arrow's methods.
 df_out = session["result"].to_pandas()
 print(df_out)
 ```
+
+### 4. Use Column-Oriented Helpers
+
+You can also reshape or enrich loaded datasets through the session-local column API.
+
+```python
+session.dataset("health").assign(
+  out="health_scored",
+  bmi="round(weight_kg / (height_m**2), 0.1)",
+  bmi_flag="case when bmi >= 25 then 'high' when bmi >= 18.5 then 'normal' else 'low' end",
+)
+
+session.dataset("visits_long").transpose(
+  by=["subject_id"],
+  id=["visit"],
+  var=["score"],
+  out="visits_wide",
+)
+```
+
 ---
 
 

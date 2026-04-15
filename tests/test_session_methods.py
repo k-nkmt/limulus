@@ -99,6 +99,154 @@ SESSION_METHOD_SCENARIOS = {
         "expected_id_label": b"Identifier",
         "expected_amount_label": b"Amount",
     },
+    "transpose_default": {
+        "overview": "transpose without id keeps PROC TRANSPOSE-like _NAME_/COLn output",
+        "inputs": {"src": {"id": [1, 2], "x": [10, 20], "y": [100, 200]}},
+        "expected_output": [
+            {"_NAME_": "x", "COL1": 10, "COL2": 20},
+            {"_NAME_": "y", "COL1": 100, "COL2": 200},
+        ],
+    },
+    "transpose_by": {
+        "overview": "transpose with by groups observations into COLn rows per variable",
+        "inputs": {
+            "src": {
+                "grp": ["a", "a", "b"],
+                "x": [1, 2, 3],
+                "y": [10, 20, 30],
+            }
+        },
+        "expected_output": [
+            {"grp": "a", "_NAME_": "x", "COL1": 1, "COL2": 2},
+            {"grp": "a", "_NAME_": "y", "COL1": 10, "COL2": 20},
+            {"grp": "b", "_NAME_": "x", "COL1": 3, "COL2": None},
+            {"grp": "b", "_NAME_": "y", "COL1": 30, "COL2": None},
+        ],
+    },
+    "transpose_id": {
+        "overview": "transpose with id pivots one value column into wide output columns",
+        "inputs": {
+            "src": {
+                "grp": ["a", "a", "b"],
+                "visit": ["v1", "v2", "v1"],
+                "score": [10, 20, 30],
+            }
+        },
+        "expected_output": [
+            {"grp": "a", "v1": 10, "v2": 20},
+            {"grp": "b", "v1": 30, "v2": None},
+        ],
+    },
+    "transpose_case_insensitive": {
+        "overview": "transpose resolves by/id/var columns case-insensitively",
+        "inputs": {
+            "src": {
+                "Grp": ["a", "a", "b"],
+                "Visit": ["v1", "v2", "v1"],
+                "Score": [10, 20, 30],
+            }
+        },
+        "expected_output": [
+            {"Grp": "a", "v1": 10, "v2": 20},
+            {"Grp": "b", "v1": 30, "v2": None},
+        ],
+    },
+    "transpose_duplicate_id": {
+        "overview": "transpose raises when duplicate id values appear within a by group",
+        "inputs": {
+            "src": {
+                "grp": ["a", "a"],
+                "visit": ["v1", "v1"],
+                "score": [10, 20],
+            }
+        },
+        "error_fragment": "Duplicate ID value",
+    },
+    "assign_basic": {
+        "overview": "assign supports literals, expressions, functions, case when, and left-to-right references",
+        "inputs": {
+            "src": {
+                "name": ["Alice", "Bob", "Cara"],
+                "weight": [50.0, 80.0, 45.0],
+                "height_m": [1.60, 1.80, 1.50],
+            }
+        },
+        "expected_output": [
+            {
+                "name": "Alice",
+                "weight": 50.0,
+                "height_m": 1.60,
+                "cohort": "A",
+                "name_up": "ALICE",
+                "bmi": 19.53,
+                "bmi_flag": "normal",
+                "summary": "ALICE:A",
+            },
+            {
+                "name": "Bob",
+                "weight": 80.0,
+                "height_m": 1.80,
+                "cohort": "A",
+                "name_up": "BOB",
+                "bmi": 24.69,
+                "bmi_flag": "normal",
+                "summary": "BOB:A",
+            },
+            {
+                "name": "Cara",
+                "weight": 45.0,
+                "height_m": 1.50,
+                "cohort": "A",
+                "name_up": "CARA",
+                "bmi": 20.0,
+                "bmi_flag": "normal",
+                "summary": "CARA:A",
+            },
+        ],
+    },
+    "assign_unsupported_function": {
+        "overview": "assign fails with a clear error for unsupported functions",
+        "inputs": {"src": {"name": ["Alice"]}},
+        "error_fragment": "Unsupported function",
+    },
+    "assign_case_insensitive": {
+        "overview": "assign expressions can reference source columns without matching the exact original case",
+        "inputs": {
+            "src": {
+                "Name": ["Alice", "Bob"],
+                "Weight": [50.0, 80.0],
+                "Height_M": [1.60, 1.80],
+            }
+        },
+        "expected_output": [
+            {
+                "Name": "Alice",
+                "Weight": 50.0,
+                "Height_M": 1.60,
+                "name_up": "ALICE",
+                "bmi": 19.53,
+            },
+            {
+                "Name": "Bob",
+                "Weight": 80.0,
+                "Height_M": 1.80,
+                "name_up": "BOB",
+                "bmi": 24.69,
+            },
+        ],
+    },
+    "assign_case_when_keywords_in_strings": {
+        "overview": "assign case when parsing does not treat keyword text inside strings as clause boundaries",
+        "inputs": {
+            "src": {
+                "note": ["contains then", "plain"],
+            }
+        },
+        "expected_output": [
+            {"note": "contains then", "flag": "contains then:end"},
+            {"note": "plain", "flag": "else"},
+        ],
+    },
 }
 
 
@@ -269,3 +417,116 @@ def test_session_sql_restores_arrow_metadata_after_polars_roundtrip() -> None:
     assert query_result.schema.field("amount").metadata[b"label"] == scenario["expected_amount_label"]
     assert session.to_arrow("out").schema.metadata[b"memlabel"] == scenario["expected_memlabel"]
     assert session.to_arrow("out").schema.field("id").metadata[b"label"] == scenario["expected_id_label"]
+
+
+def test_session_transpose_matches_proc_transpose_style_defaults() -> None:
+    scenario = SESSION_METHOD_SCENARIOS["transpose_default"]
+    session = Session()
+    session.load("src", pa.table(scenario["inputs"]["src"]))
+
+    session.transpose("src", var=["x", "y"], out="out")
+
+    assert session["out"].to_pylist() == scenario["expected_output"]
+
+
+def test_session_transpose_groups_by_columns_before_emitting_coln_rows() -> None:
+    scenario = SESSION_METHOD_SCENARIOS["transpose_by"]
+    session = Session()
+    session.load("src", pa.table(scenario["inputs"]["src"]))
+
+    session.transpose("src", by=["grp"], var=["x", "y"], out="out")
+
+    assert session["out"].to_pylist() == scenario["expected_output"]
+
+
+def test_session_transpose_with_id_pivots_one_value_column_to_wide_output() -> None:
+    scenario = SESSION_METHOD_SCENARIOS["transpose_id"]
+    session = Session()
+    session.load("src", pa.table(scenario["inputs"]["src"]))
+
+    session.transpose("src", by=["grp"], id="visit", var=["score"], out="out")
+
+    assert session["out"].to_pylist() == scenario["expected_output"]
+
+
+def test_session_transpose_resolves_columns_case_insensitively() -> None:
+    scenario = SESSION_METHOD_SCENARIOS["transpose_case_insensitive"]
+    session = Session()
+    session.load("src", pa.table(scenario["inputs"]["src"]))
+
+    session.transpose("src", by=["grp"], id="visit", var=["score"], out="out")
+
+    assert session["out"].to_pylist() == scenario["expected_output"]
+
+
+def test_session_transpose_raises_for_duplicate_id_values_within_group() -> None:
+    scenario = SESSION_METHOD_SCENARIOS["transpose_duplicate_id"]
+    session = Session()
+    session.load("src", pa.table(scenario["inputs"]["src"]))
+
+    with pytest.raises(ValueError, match=scenario["error_fragment"]):
+        session.transpose("src", by=["grp"], id="visit", var=["score"], out="out")
+
+
+def test_session_transpose_rejects_sequence_id_arguments() -> None:
+    session = Session()
+    session.load("src", pa.table({"grp": ["a"], "visit": ["v1"], "score": [10]}))
+
+    with pytest.raises(TypeError, match="single column name"):
+        session.transpose("src", by=["grp"], id=["visit"], var=["score"], out="out")
+
+
+def test_session_assign_supports_literals_expressions_functions_case_when_and_ordering() -> None:
+    scenario = SESSION_METHOD_SCENARIOS["assign_basic"]
+    session = Session()
+    session.load("src", pa.table(scenario["inputs"]["src"]))
+
+    session.assign(
+        "src",
+        out="out",
+        cohort="'A'",
+        name_up="upcase(name)",
+        bmi="round(weight / (height_m * height_m), 0.01)",
+        bmi_flag="case when bmi >= 25 then 'high' when bmi >= 18.5 then 'normal' else 'low' end",
+        summary="catx(':', name_up, cohort)",
+    )
+
+    assert session["out"].to_pylist() == scenario["expected_output"]
+
+
+def test_session_assign_raises_for_unsupported_functions() -> None:
+    scenario = SESSION_METHOD_SCENARIOS["assign_unsupported_function"]
+    session = Session()
+    session.load("src", pa.table(scenario["inputs"]["src"]))
+
+    with pytest.raises(ValueError, match=scenario["error_fragment"]):
+        session.assign("src", out="out", invalid="unknown_func(name)")
+
+
+def test_session_assign_resolves_expression_columns_case_insensitively() -> None:
+    scenario = SESSION_METHOD_SCENARIOS["assign_case_insensitive"]
+    session = Session()
+    session.load("src", pa.table(scenario["inputs"]["src"]))
+
+    session.assign(
+        "src",
+        out="out",
+        name_up="upcase(name)",
+        bmi="round(weight / (height_m * height_m), 0.01)",
+    )
+
+    assert session["out"].to_pylist() == scenario["expected_output"]
+
+
+def test_session_assign_case_when_parser_ignores_keywords_inside_string_literals() -> None:
+    scenario = SESSION_METHOD_SCENARIOS["assign_case_when_keywords_in_strings"]
+    session = Session()
+    session.load("src", pa.table(scenario["inputs"]["src"]))
+
+    session.assign(
+        "src",
+        out="out",
+        flag="case when find(note, 'then') > 0 then catx(':', note, 'end') else 'else' end",
+    )
+
+    assert session["out"].to_pylist() == scenario["expected_output"]

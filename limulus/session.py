@@ -9,6 +9,14 @@ from typing import Any
 import pyarrow as pa
 import polars as pl
 
+from ._naming import _column_key
+from .column_api import (
+    assign_columns as apply_assignment_columns,
+    resolve_column_name as resolve_column_api_name,
+    resolve_existing_columns,
+    resolve_transpose_var_columns,
+    transpose_table as build_transposed_table,
+)
 from .runtime import DataStepExecutor
 from .models import DatasetCatalog, ExecuteRequest, LogEntry, SubmitResult
 
@@ -123,7 +131,7 @@ class DatasetView:
             A :class:`DatasetView` for the resulting dataset.
 
         Note:
-            Column names in this column-oriented API are currently case-sensitive.
+            Column names are resolved case-insensitively when the match is unique.
         """
         output_name = self._session._resolve_output_name(self._name, out=out)
         self._session._astype_dataset(self._name, mapping, out=output_name)
@@ -186,6 +194,55 @@ class DatasetView:
         """
         output_name = self._session._resolve_output_name(self._name, out=out)
         self._session.sort(self._name, by, out=output_name, nodupkey=nodupkey)
+        return DatasetView(self._session, output_name)
+
+    def transpose(
+        self,
+        *,
+        by: str | Sequence[str] | None = None,
+        id: str | None = None,
+        var: str | Sequence[str] | None = None,
+        out: str | None = None,
+    ) -> "DatasetView":
+        """Transposes the dataset using PROC TRANSPOSE-like defaults.
+
+        Args:
+            by: Grouping columns preserved in the output.
+            id: Single column name expanded into output column names.
+            var: Value columns to transpose. When omitted, uses all non-``by``/``id`` columns.
+            out: Output dataset name. If omitted, overwrites this view's dataset.
+
+        Returns:
+            A :class:`DatasetView` for the resulting dataset.
+
+        Note:
+            This helper is intended as a convenience API with PROC TRANSPOSE-like defaults.
+            Performance is not a primary goal. For performance-critical reshaping, prefer
+            Arrow or Polars directly.
+        """
+        output_name = self._session._resolve_output_name(self._name, out=out)
+        self._session.transpose(self._name, by=by, id=id, var=var, out=output_name)
+        return DatasetView(self._session, output_name)
+
+    def assign(self, out: str | None = None, **assignments: Any) -> "DatasetView":
+        """Adds or replaces columns using ordered expressions or literals.
+
+        Args:
+            out: Output dataset name. If omitted, overwrites this view's dataset.
+            **assignments: Column assignments evaluated from left to right. String values are
+                interpreted as expressions. Non-string values are treated as literals.
+
+        Returns:
+            A :class:`DatasetView` for the resulting dataset.
+
+        Note:
+            The current implementation evaluates expressions row by row in Python after
+            materializing rows. The API boundary is kept stable so a future column-oriented
+            backend can replace the internals, but this release should not be treated as a
+            guaranteed high-performance path.
+        """
+        output_name = self._session._resolve_output_name(self._name, out=out)
+        self._session.assign(self._name, out=output_name, **assignments)
         return DatasetView(self._session, output_name)
 
     def unload(self, *, missing_ok: bool = True) -> bool:
@@ -550,7 +607,7 @@ class Session:
 
         """
         table = self.to_arrow(source)
-        selected = table.select(list(columns))
+        selected = table.select(list(resolve_existing_columns(table, columns, parameter_name="select")))
         output_name = self._resolve_output_name(source, out=out, target=target)
         self.load(output_name, selected)
         return self
@@ -587,7 +644,11 @@ class Session:
             >>> session.rename("bmi", {"height_m": "height_meter"})
         """
         table = self.to_arrow(source)
-        renamed_columns = [mapping.get(name, name) for name in table.column_names]
+        resolved_mapping = {
+            self._resolve_column_name(table, source_name, parameter_name="rename"): target_name
+            for source_name, target_name in mapping.items()
+        }
+        renamed_columns = [resolved_mapping.get(name, name) for name in table.column_names]
         renamed = table.rename_columns(renamed_columns)
         output_name = self._resolve_output_name(source, out=out, target=target)
         self.load(output_name, renamed)
@@ -596,8 +657,12 @@ class Session:
     def _astype_dataset(self, source: str, mapping: Mapping[str, str], out: str | None = None, *, target: str | None = None) -> Session:
         table = self.to_arrow(source)
         frame = pl.from_arrow(table)
+        resolved_mapping = {
+            self._resolve_column_name(table, column_name, parameter_name="astype"): dtype
+            for column_name, dtype in mapping.items()
+        }
         casted = self._polars_result_to_arrow(
-            frame.cast({name: self._resolve_polars_dtype(dtype) for name, dtype in mapping.items()}),
+            frame.cast({name: self._resolve_polars_dtype(dtype) for name, dtype in resolved_mapping.items()}),
             table,
         )
         output_name = self._resolve_output_name(source, out=out, target=target)
@@ -611,6 +676,84 @@ class Session:
         workflow and forwards to the same internal implementation.
         """
         return self._astype_dataset(source, mapping, out=out, target=target)
+
+    def transpose(
+        self,
+        source: str,
+        *,
+        by: str | Sequence[str] | None = None,
+        id: str | None = None,
+        var: str | Sequence[str] | None = None,
+        out: str | None = None,
+        target: str | None = None,
+    ) -> Session:
+        """Transposes a dataset using a minimal PROC TRANSPOSE-like contract.
+
+        Args:
+            source: Source dataset name.
+            by: Grouping columns preserved in the output.
+            id: Single column name expanded into output column names.
+            var: Value columns to transpose. When omitted, uses all non-``by``/``id`` columns.
+            out: Output dataset name. If omitted, overwrites ``source``.
+
+        Returns:
+            ``self`` (for method chaining).
+
+        Note:
+            ``var`` defaults to all non-``by``/``id`` columns. Without ``id``, output rows contain
+            ``_NAME_`` and ``COL1..COLn``. With ``id``, the current implementation supports exactly
+            one ``id`` column and one value column. Duplicate or missing ``id`` values within a
+            group raise ``ValueError``. This helper is a convenience API rather than a
+            performance-oriented transpose implementation.
+        """
+        table = self.to_arrow(source)
+        by_columns = resolve_existing_columns(table, by, parameter_name="by")
+        if id is None:
+            id_columns: tuple[str, ...] = ()
+        else:
+            if not isinstance(id, str):
+                raise TypeError("Session.transpose id must be a single column name")
+            id_columns = (self._resolve_column_name(table, id, parameter_name="id"),)
+        var_columns = resolve_transpose_var_columns(table, by_columns=by_columns, id_columns=id_columns, var=var)
+
+        transposed = build_transposed_table(
+            table,
+            by_columns=by_columns,
+            id_columns=id_columns,
+            var_columns=var_columns,
+            materialize_table=self._materialize_rebuilt_table,
+        )
+        output_name = self._resolve_output_name(source, out=out, target=target)
+        self.load(output_name, transposed)
+        return self
+
+    def assign(self, source: str, out: str | None = None, *, target: str | None = None, **assignments: Any) -> Session:
+        """Adds or replaces columns using ordered Data Step-style assignments.
+
+        Args:
+            source: Source dataset name.
+            out: Output dataset name. If omitted, overwrites ``source``.
+            **assignments: Column assignments evaluated from left to right. String values are
+                interpreted as expressions. Non-string values are treated as literals.
+
+        Returns:
+            ``self`` (for method chaining).
+
+        Note:
+            Within one call, assignments are evaluated from left to right, and later expressions can
+            reference columns created earlier in the same call. The current implementation is still
+            Python-side row evaluation over materialized rows, not a guaranteed column-oriented
+            execution path.
+        """
+        table = self.to_arrow(source)
+        updated = apply_assignment_columns(
+            table,
+            assignments,
+            materialize_table=self._materialize_rebuilt_table,
+        )
+        output_name = self._resolve_output_name(source, out=out, target=target)
+        self.load(output_name, updated)
+        return self
 
     def sql(self, query: str, out: str | None = None, *, target: str | None = None):
         """Executes SQL against session datasets.
@@ -668,8 +811,7 @@ class Session:
         import pyarrow.compute as pc
 
         table = self.to_arrow(source)
-        if variable_name not in table.column_names:
-            raise KeyError(f"Column not found for Session.filter: {variable_name}")
+        variable_name = self._resolve_column_name(table, variable_name, parameter_name="filter")
 
         column = table[variable_name]
         scalar = pa.scalar(scalar_value)
@@ -725,7 +867,8 @@ class Session:
             ``self`` (for method chaining).
         """
         table = self.to_arrow(source)
-        keep_columns = [name for name in table.column_names if name not in set(columns)]
+        drop_columns = set(resolve_existing_columns(table, columns, parameter_name="drop"))
+        keep_columns = [name for name in table.column_names if name not in drop_columns]
         return self.select(source, keep_columns, out=out, target=target)
     
     def sort(
@@ -757,7 +900,7 @@ class Session:
             >>> session.sort("class", ["age"], nodupkey=True)
         """
         table = self.to_arrow(source)
-        key, key_names = self._normalize_sort_key(by)
+        key, key_names = self._normalize_sort_key(table, by)
 
         sorted_table = table.sort_by(key)
         if nodupkey:
@@ -814,6 +957,15 @@ class Session:
         return self
 
     @staticmethod
+    def _resolve_column_name(table: pa.Table, column: str, *, parameter_name: str) -> str:
+        return resolve_column_api_name(table, column, parameter_name=parameter_name)
+
+    @staticmethod
+    def _materialize_rebuilt_table(rows: Sequence[Mapping[str, Any]], source_table: pa.Table) -> pa.Table:
+        rebuilt = pa.Table.from_pylist([dict(row) for row in rows])
+        return Session._restore_arrow_schema_from_sources(rebuilt, source_tables=(source_table,))
+
+    @staticmethod
     def _to_registerable_dataset(data: Any) -> Any:
         if isinstance(data, pa.Table):
             return data
@@ -863,19 +1015,22 @@ class Session:
             return target
         return source
 
-    @staticmethod
-    def _normalize_sort_key(by: str | Sequence[str]) -> tuple[str | list[tuple[str, str]], tuple[str, ...]]:
+    def _normalize_sort_key(self, table: pa.Table, by: str | Sequence[str]) -> tuple[str | list[tuple[str, str]], tuple[str, ...]]:
         if isinstance(by, str):
-            return by, (by,)
+            resolved_name = self._resolve_column_name(table, by, parameter_name="sort")
+            return resolved_name, (resolved_name,)
 
         sort_items = list(by)
         if not sort_items:
             raise ValueError("Session.sort requires at least one sort key")
         if isinstance(sort_items[0], str):
-            names = tuple(str(item) for item in sort_items)
+            names = tuple(self._resolve_column_name(table, str(item), parameter_name="sort") for item in sort_items)
             return [(name, "ascending") for name in names], names
 
-        normalized_items = [(str(item[0]), str(item[1])) for item in sort_items]
+        normalized_items = [
+            (self._resolve_column_name(table, str(item[0]), parameter_name="sort"), str(item[1]))
+            for item in sort_items
+        ]
         return normalized_items, tuple(name for name, _ in normalized_items)
 
     @classmethod
@@ -931,16 +1086,18 @@ class Session:
 
         for source in source_tables:
             for field in source.schema:
-                existing_field = source_fields.get(field.name)
+                field_key = _column_key(field.name)
+                existing_field = source_fields.get(field_key)
                 if existing_field is None:
-                    source_fields[field.name] = field
+                    source_fields[field_key] = field
                     continue
                 if existing_field.metadata != field.metadata:
-                    ambiguous_fields.add(field.name)
+                    ambiguous_fields.add(field_key)
 
         fields = []
         for field in target_schema:
-            source_field = None if field.name in ambiguous_fields else source_fields.get(field.name)
+            field_key = _column_key(field.name)
+            source_field = None if field_key in ambiguous_fields else source_fields.get(field_key)
             if source_field is None or source_field.metadata is None:
                 fields.append(field)
                 continue

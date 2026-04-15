@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented on this page.
 
+## [Unreleased]
+
+### Added
+
+- `Session.transpose(...)` and `DatasetView.transpose(...)` for minimal PROC TRANSPOSE-like reshaping with `by`, `id`, `var`, and `out`.
+- `Session.assign(...)` and `DatasetView.assign(...)` for ordered Data Step-style column creation with literals, expressions, built-in functions, and `case when ... then ... else ... end`.
+
+### Changed
+
+- Column-oriented reshape logic now uses shared column-resolution and table-rebuild helpers in `session.py` to keep future case-insensitive and metadata-stability work localized.
+
 ## [v0.2.0] - 2026-03-17
 
 ### Added

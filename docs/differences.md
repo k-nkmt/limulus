@@ -41,6 +41,21 @@ If exact physical types matter, it is recommended to perform type conversion at 
 ### SQL API
 `Session.sql()` is available for read-oriented queries and `CREATE TABLE ... AS ...` style result persistence. The feature is backed by the Polars SQL engine and is intended as a practical session-level query helper rather than a full PROC SQL reimplementation.
 
+### Transpose / Assign API
+`Session.transpose()` / `DatasetView.transpose()` and `Session.assign()` / `DatasetView.assign()` are Python-side column APIs rather than DATA step statements.
+
+Current transpose scope is intentionally narrow:
+
+- Without `id`, output follows a PROC TRANSPOSE-like shape with `_NAME_` and `COL1..COLn` columns.
+- With `id`, the current release accepts exactly one `id` column name and one `var` column.
+- Duplicate or missing `id` values within a group raise an error instead of applying name mangling rules.
+
+`transpose()` is a convenience helper. Performance is not a primary design goal; for performance-critical reshaping, prefer Arrow or Polars directly.
+
+For `assign()`, string values are interpreted as expressions. To assign a string literal, quote it inside the expression, for example `flag="'A'"`.
+
+The current `assign()` implementation still materializes rows and evaluates expressions row by row in Python. The API boundary is intended to support a future column-oriented implementation, but the current release should not be treated as a guaranteed high-performance path.
+
 ### length
 Character length is variable by default, so no character truncation occurs.
 
@@ -100,7 +115,6 @@ Useful for extending functionality not covered by limulus's built-in functions, 
 | SAS language Feature | Notes |
 |---------|------|
 | Attrib | Full ATTRIB parity is not implemented yet; use dataset labels and LABEL statements for supported metadata cases |
-| Data transposition | Handle on the Python side; `retain` workaround available; `transpose` API planned separately |
 | Numeric format (`PUT(x, 8.2)`) | Planned for future implementation; `apply` can be used as a workaround |
 | Format (`FORMAT`, `INFORMAT`) | Handle with if statements and merge; to be revisited |
 | Macro variables (`%let`, `&var`) | Planned; use Python f-string as an alternative |
