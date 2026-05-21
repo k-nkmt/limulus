@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-import re
 import time
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
@@ -9,7 +8,12 @@ from typing import Any
 import pyarrow as pa
 import polars as pl
 
-from ._naming import _column_key
+from ._naming import _column_key, _dataset_key
+from .arrow_bridge import (
+    materialize_rebuilt_table,
+    polars_result_to_arrow,
+    preserve_arrow_metadata,
+)
 from .column_api import (
     assign_columns as apply_assignment_columns,
     resolve_column_name as resolve_column_api_name,
@@ -17,8 +21,106 @@ from .column_api import (
     resolve_transpose_var_columns,
     transpose_table as build_transposed_table,
 )
+from .format_registry import FormatRegistry
+from .session_parsing import classify_sql, parse_simple_filter, raise_session_sql_execution_error
 from .runtime import DataStepExecutor
-from .models import DatasetCatalog, ExecuteRequest, LogEntry, SubmitResult
+from .models import (
+    DatasetCatalog,
+    ExecuteRequest,
+    LogEntry,
+    SubmitResult,
+)
+
+
+_DICTIONARY_TABLES_SCHEMA = pa.schema(
+    [
+        pa.field("LIBNAME", pa.string()),
+        pa.field("MEMNAME", pa.string()),
+        pa.field("MEMTYPE", pa.string()),
+        pa.field("MEMLABEL", pa.string()),
+        pa.field("NOBS", pa.int64()),
+        pa.field("NVAR", pa.int64()),
+    ]
+)
+_DICTIONARY_COLUMNS_SCHEMA = pa.schema(
+    [
+        pa.field("LIBNAME", pa.string()),
+        pa.field("MEMNAME", pa.string()),
+        pa.field("MEMTYPE", pa.string()),
+        pa.field("NAME", pa.string()),
+        pa.field("TYPE", pa.string()),
+        pa.field("VARNUM", pa.int64()),
+        pa.field("LABEL", pa.string()),
+        pa.field("FORMAT", pa.string()),
+        pa.field("INFORMAT", pa.string()),
+    ]
+)
+
+
+def _empty_table(schema: pa.Schema) -> pa.Table:
+    arrays = [pa.array([], type=field.type) for field in schema]
+    return pa.Table.from_arrays(arrays, schema=schema)
+
+
+def _decode_metadata(metadata: Mapping[bytes, bytes] | None, key: bytes) -> str:
+    if metadata is None:
+        return ""
+    value = metadata.get(key, b"")
+    return value.decode("utf-8", errors="replace") if isinstance(value, bytes) else str(value)
+
+
+class DictionaryProvider:
+    def __init__(self, catalog: DatasetCatalog) -> None:
+        self._catalog = catalog
+
+    @property
+    def tables(self) -> pa.Table:
+        rows: list[dict[str, Any]] = []
+        for name in self._catalog:
+            table = self._catalog[name]
+            rows.append(
+                {
+                    "LIBNAME": "WORK",
+                    "MEMNAME": _dataset_key(name),
+                    "MEMTYPE": "DATA",
+                    "MEMLABEL": _decode_metadata(table.schema.metadata, b"memlabel"),
+                    "NOBS": table.num_rows,
+                    "NVAR": table.num_columns,
+                }
+            )
+        return pa.Table.from_pylist(rows, schema=_DICTIONARY_TABLES_SCHEMA) if rows else _empty_table(_DICTIONARY_TABLES_SCHEMA)
+
+    @property
+    def columns(self) -> pa.Table:
+        rows: list[dict[str, Any]] = []
+        for name in self._catalog:
+            table = self._catalog[name]
+            rows.extend(self._column_rows(name, table))
+        return pa.Table.from_pylist(rows, schema=_DICTIONARY_COLUMNS_SCHEMA) if rows else _empty_table(_DICTIONARY_COLUMNS_SCHEMA)
+
+    def __call__(self, name: str) -> pa.Table:
+        table = self._catalog[name]
+        rows = self._column_rows(name, table)
+        return pa.Table.from_pylist(rows, schema=_DICTIONARY_COLUMNS_SCHEMA) if rows else _empty_table(_DICTIONARY_COLUMNS_SCHEMA)
+
+    @staticmethod
+    def _column_rows(name: str, table: pa.Table) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for varnum, field in enumerate(table.schema, start=1):
+            rows.append(
+                {
+                    "LIBNAME": "WORK",
+                    "MEMNAME": _dataset_key(name),
+                    "MEMTYPE": "DATA",
+                    "NAME": field.name,
+                    "TYPE": str(field.type),
+                    "VARNUM": varnum,
+                    "LABEL": _decode_metadata(field.metadata, b"label"),
+                    "FORMAT": "",
+                    "INFORMAT": "",
+                }
+            )
+        return rows
 
 
 class DatasetView:
@@ -39,6 +141,10 @@ class DatasetView:
     @property
     def name(self) -> str:
         return self._name
+
+    @property
+    def dictionary(self) -> pa.Table:
+        return self._session.dictionary(self._name)
 
     def to_arrow(self):
         """Returns this dataset as a ``pyarrow.Table``."""
@@ -120,12 +226,20 @@ class DatasetView:
         self._session.rename(self._name, mapping, out=output_name)
         return DatasetView(self._session, output_name)
 
-    def astype(self, mapping: Mapping[str, str], out: str | None = None) -> "DatasetView":
+    def astype(
+        self,
+        mapping: Mapping[str, str],
+        out: str | None = None,
+        *,
+        alias: str | Mapping[str, str] | None = None,
+    ) -> "DatasetView":
         """Casts columns using a ``{column: dtype}`` mapping.
 
         Args:
             mapping: Mapping from column name to dtype string.
             out: Output dataset name. If omitted, overwrites this view's dataset.
+            alias: Optional new column name, or ``{source: alias}`` mapping, for
+                writing cast results into new columns instead of overwriting the source.
 
         Returns:
             A :class:`DatasetView` for the resulting dataset.
@@ -134,12 +248,18 @@ class DatasetView:
             Column names are resolved case-insensitively when the match is unique.
         """
         output_name = self._session._resolve_output_name(self._name, out=out)
-        self._session._astype_dataset(self._name, mapping, out=output_name)
+        self._session._astype_dataset(self._name, mapping, out=output_name, alias=alias)
         return DatasetView(self._session, output_name)
 
-    def cast(self, mapping: Mapping[str, str], out: str | None = None) -> "DatasetView":
+    def cast(
+        self,
+        mapping: Mapping[str, str],
+        out: str | None = None,
+        *,
+        alias: str | Mapping[str, str] | None = None,
+    ) -> "DatasetView":
         """Alias for :meth:`astype`."""
-        return self.astype(mapping, out=out)
+        return self.astype(mapping, out=out, alias=alias)
 
     def apply_options(
         self,
@@ -236,10 +356,10 @@ class DatasetView:
             A :class:`DatasetView` for the resulting dataset.
 
         Note:
-            The current implementation evaluates expressions row by row in Python after
-            materializing rows. The API boundary is kept stable so a future column-oriented
-            backend can replace the internals, but this release should not be treated as a
-            guaranteed high-performance path.
+            Assignments are translated to ordered Polars expressions and evaluated from
+            left to right. Expressions or functions that cannot be translated to the
+            column-oriented assign pipeline raise ``ValueError`` instead of falling back
+            to Python row materialization.
         """
         output_name = self._session._resolve_output_name(self._name, out=out)
         self._session.assign(self._name, out=output_name, **assignments)
@@ -258,12 +378,6 @@ class DatasetView:
 
 
 class Session:
-    _SIMPLE_FILTER = re.compile(r"^\s*([A-Za-z_][\w\.]*)\s*(>=|<=|!=|=|>|<)\s*(.+?)\s*$")
-    _CREATE_TABLE_SQL = re.compile(
-        r"^\s*create\s+table\s+([A-Za-z_][\w]*)\s+as\s+(.*?)\s*;?\s*$",
-        re.IGNORECASE | re.DOTALL,
-    )
-
     def __init__(
         self,
         *,
@@ -291,13 +405,22 @@ class Session:
             >>> session = limulus.Session(backend="python")  # Force Python backend
         """
         selected_runtime_backend = runtime_backend or backend
+        self._format_registry = FormatRegistry()
         self._executor = DataStepExecutor(
             runtime_backend=selected_runtime_backend,
             parser_backend=parser_backend,
+            format_registry=self._format_registry,
         )
         self._datasets = DatasetCatalog()
+        self._dictionary_provider = DictionaryProvider(self._datasets)
         self._last_submit_result: SubmitResult | None = None
         self._options: dict[str, Any] = dict(options or {})
+
+    def register_format(self, name: str, formatter: Any) -> None:
+        self._format_registry.register_format(name, formatter)
+
+    def register_informat(self, name: str, parser: Any, *, kind: str | None = None) -> None:
+        self._format_registry.register_informat(name, parser, kind=kind)
 
     def load(self, name: str, data: Any) -> None:
         """Registers a single dataset in the session catalog.
@@ -316,6 +439,8 @@ class Session:
             >>> session = limulus.Session()
             >>> session.load("mydata", pa.table({"x": [1, 2, 3]}))
         """
+        if self._is_dictionary_reserved_name(name):
+            raise ValueError(f"Cannot overwrite dictionary table: {name}")
         dataset = self._to_registerable_dataset(data)
         self._executor.register_tables({name: dataset})
         self._datasets.set(name, self._to_arrow(dataset))
@@ -441,6 +566,10 @@ class Session:
                 message=diagnostic.message,
                 location=diagnostic.location,
                 stage=diagnostic.stage,
+                span=diagnostic.span,
+                labels=diagnostic.labels,
+                notes=diagnostic.notes,
+                source_text=diagnostic.source_text,
             )
             for diagnostic in response.diagnostics
         )
@@ -456,6 +585,10 @@ class Session:
                         message=diagnostic.message,
                         location=diagnostic.location,
                         stage=diagnostic.stage,
+                        span=diagnostic.span,
+                        labels=diagnostic.labels,
+                        notes=diagnostic.notes,
+                        source_text=diagnostic.source_text,
                     )
                     for diagnostic in converted.diagnostics
                 ),
@@ -498,6 +631,10 @@ class Session:
     def work(self) -> DatasetCatalog:
         """Alias for :attr:`datasets`."""
         return self._datasets
+
+    @property
+    def dictionary(self) -> DictionaryProvider:
+        return self._dictionary_provider
 
     def __getitem__(self, name: str) -> Any:
         """Returns a dataset as a ``pyarrow.Table``.
@@ -654,28 +791,70 @@ class Session:
         self.load(output_name, renamed)
         return self
 
-    def _astype_dataset(self, source: str, mapping: Mapping[str, str], out: str | None = None, *, target: str | None = None) -> Session:
+    def _astype_dataset(
+        self,
+        source: str,
+        mapping: Mapping[str, str],
+        out: str | None = None,
+        *,
+        alias: str | Mapping[str, str] | None = None,
+        target: str | None = None,
+    ) -> Session:
         table = self.to_arrow(source)
         frame = pl.from_arrow(table)
         resolved_mapping = {
             self._resolve_column_name(table, column_name, parameter_name="astype"): dtype
             for column_name, dtype in mapping.items()
         }
-        casted = self._polars_result_to_arrow(
-            frame.cast({name: self._resolve_polars_dtype(dtype) for name, dtype in resolved_mapping.items()}),
-            table,
-        )
+        resolved_alias = self._resolve_cast_aliases(table, resolved_mapping, alias)
+        polars_dtype_mapping = {
+            name: self._resolve_polars_dtype(dtype) for name, dtype in resolved_mapping.items()
+        }
+        if resolved_alias:
+            casted_frame = frame.with_columns(
+                [
+                    pl.col(name).cast(polars_dtype_mapping[name]).alias(resolved_alias.get(name, name))
+                    for name in resolved_mapping
+                ]
+            )
+        else:
+            casted_frame = frame.cast(polars_dtype_mapping)
+        casted = polars_result_to_arrow(casted_frame, table)
         output_name = self._resolve_output_name(source, out=out, target=target)
         self.load(output_name, casted)
         return self
 
-    def cast(self, source: str, mapping: Mapping[str, str], out: str | None = None, *, target: str | None = None) -> Session:
+    def astype(
+        self,
+        source: str,
+        mapping: Mapping[str, str],
+        out: str | None = None,
+        *,
+        alias: str | Mapping[str, str] | None = None,
+        target: str | None = None,
+    ) -> Session:
+        """Casts dataset columns using a ``{column: dtype}`` mapping.
+
+        When ``alias=`` is provided, cast results are written into new columns
+        instead of replacing the original source columns.
+        """
+        return self._astype_dataset(source, mapping, out=out, alias=alias, target=target)
+
+    def cast(
+        self,
+        source: str,
+        mapping: Mapping[str, str],
+        out: str | None = None,
+        *,
+        alias: str | Mapping[str, str] | None = None,
+        target: str | None = None,
+    ) -> Session:
         """Alias for dataset-scoped column casting.
 
         This is a convenience alias for the DatasetView-style :meth:`DatasetView.astype`
         workflow and forwards to the same internal implementation.
         """
-        return self._astype_dataset(source, mapping, out=out, target=target)
+        return self._astype_dataset(source, mapping, out=out, alias=alias, target=target)
 
     def transpose(
         self,
@@ -721,7 +900,7 @@ class Session:
             by_columns=by_columns,
             id_columns=id_columns,
             var_columns=var_columns,
-            materialize_table=self._materialize_rebuilt_table,
+            materialize_table=materialize_rebuilt_table,
         )
         output_name = self._resolve_output_name(source, out=out, target=target)
         self.load(output_name, transposed)
@@ -741,15 +920,16 @@ class Session:
 
         Note:
             Within one call, assignments are evaluated from left to right, and later expressions can
-            reference columns created earlier in the same call. The current implementation is still
-            Python-side row evaluation over materialized rows, not a guaranteed column-oriented
-            execution path.
+            reference columns created earlier in the same call. Supported assignment syntax is
+            translated into ordered Polars expressions; unsupported constructs raise ``ValueError``
+            instead of silently falling back to Python row materialization.
         """
         table = self.to_arrow(source)
         updated = apply_assignment_columns(
             table,
             assignments,
-            materialize_table=self._materialize_rebuilt_table,
+            finalize_table=preserve_arrow_metadata,
+            format_registry=self._format_registry,
         )
         output_name = self._resolve_output_name(source, out=out, target=target)
         self.load(output_name, updated)
@@ -770,14 +950,22 @@ class Session:
         If the SQL starts with ``CREATE TABLE name AS ...``, the result is also 
         stored in the session catalog under ``name``. 
         """
-        context = pl.SQLContext()
+        classification = classify_sql(query)
+        if classification.kind == "drop_table":
+            self.unload(classification.target, missing_ok=False)
+            return None
+
+        if classification.target is not None and self._is_dictionary_reserved_name(classification.target):
+            raise ValueError(f"Cannot overwrite dictionary table: {classification.target}")
+
         source_tables = {name: self.to_arrow(name) for name in self._datasets}
-        for name, table in source_tables.items():
-            context.register(name, pl.from_arrow(table))
-        inferred_target, executable_query = self._extract_sql_target(query)
-        output_name = self._resolve_output_name(inferred_target, out=out, target=target)
-        result = context.execute(executable_query)
-        table = self._polars_result_to_arrow(result, *source_tables.values())
+        context = self._build_sql_context()
+        output_name = self._resolve_output_name(classification.target, out=out, target=target)
+        try:
+            result = context.execute(classification.query)
+            table = polars_result_to_arrow(result, *source_tables.values())
+        except Exception as error:
+            raise_session_sql_execution_error(classification.query, error)
         if output_name is not None:
             self.load(output_name, table)
         return table
@@ -786,44 +974,25 @@ class Session:
         """Row filtering (alias for :meth:`where`).
 
         """
-        matched = self._SIMPLE_FILTER.match(expression.strip())
-        if matched is None:
-            raise ValueError(f"Unsupported filter expression for Session.filter: {expression}")
-
-        variable_name = matched.group(1)
-        operator = matched.group(2)
-        raw_value = matched.group(3).strip()
-        if not raw_value:
-            raise ValueError(f"Unsupported filter expression for Session.filter: {expression}")
-
-        scalar_value: Any
-        if (raw_value.startswith('"') and raw_value.endswith('"')) or (
-            raw_value.startswith("'") and raw_value.endswith("'")
-        ):
-            scalar_value = raw_value[1:-1]
-        else:
-            try:
-                scalar_value = float(raw_value) if "." in raw_value else int(raw_value)
-            except Exception as error:
-                raise ValueError(f"Unsupported filter literal for Session.filter: {raw_value}") from error
+        filter_spec = parse_simple_filter(source, expression)
 
         import pyarrow as pa
         import pyarrow.compute as pc
 
         table = self.to_arrow(source)
-        variable_name = self._resolve_column_name(table, variable_name, parameter_name="filter")
+        variable_name = self._resolve_column_name(table, filter_spec.variable_name, parameter_name="filter")
 
         column = table[variable_name]
-        scalar = pa.scalar(scalar_value)
-        if operator == ">":
+        scalar = pa.scalar(filter_spec.scalar_value)
+        if filter_spec.operator == ">":
             mask = pc.greater(column, scalar)
-        elif operator == ">=":
+        elif filter_spec.operator == ">=":
             mask = pc.greater_equal(column, scalar)
-        elif operator == "<":
+        elif filter_spec.operator == "<":
             mask = pc.less(column, scalar)
-        elif operator == "<=":
+        elif filter_spec.operator == "<=":
             mask = pc.less_equal(column, scalar)
-        elif operator in {"=", "=="}:
+        elif filter_spec.operator in {"=", "=="}:
             mask = pc.equal(column, scalar)
         else:
             mask = pc.not_equal(column, scalar)
@@ -961,11 +1130,6 @@ class Session:
         return resolve_column_api_name(table, column, parameter_name=parameter_name)
 
     @staticmethod
-    def _materialize_rebuilt_table(rows: Sequence[Mapping[str, Any]], source_table: pa.Table) -> pa.Table:
-        rebuilt = pa.Table.from_pylist([dict(row) for row in rows])
-        return Session._restore_arrow_schema_from_sources(rebuilt, source_tables=(source_table,))
-
-    @staticmethod
     def _to_registerable_dataset(data: Any) -> Any:
         if isinstance(data, pa.Table):
             return data
@@ -1015,6 +1179,55 @@ class Session:
             return target
         return source
 
+    def _resolve_cast_aliases(
+        self,
+        table: pa.Table,
+        resolved_mapping: Mapping[str, Any],
+        alias: str | Mapping[str, str] | None,
+    ) -> dict[str, str]:
+        if alias is None:
+            return {}
+
+        if isinstance(alias, str):
+            if len(resolved_mapping) != 1:
+                raise TypeError("alias must be a mapping when casting multiple columns")
+            return {next(iter(resolved_mapping)): alias}
+
+        resolved_alias = {
+            self._resolve_column_name(table, source_name, parameter_name="alias"): target_name
+            for source_name, target_name in alias.items()
+        }
+        unexpected = sorted(name for name in resolved_alias if name not in resolved_mapping)
+        if unexpected:
+            joined = ", ".join(unexpected)
+            raise ValueError(f"alias entries must reference cast columns: {joined}")
+
+        existing_names = set(table.column_names)
+        for source_name, target_name in resolved_alias.items():
+            if target_name in existing_names and target_name != source_name:
+                raise ValueError(f"alias target already exists: {target_name}")
+        if len(set(resolved_alias.values())) != len(resolved_alias):
+            raise ValueError("alias targets must be unique")
+
+        return resolved_alias
+
+    def _build_sql_context(self) -> pl.SQLContext:
+        context = pl.SQLContext()
+        for name in self._datasets:
+            context.register(name, pl.from_arrow(self.to_arrow(name)))
+
+        dictionary_tables = self.dictionary.tables
+        dictionary_columns = self.dictionary.columns
+        context.register("dictionary.tables", pl.from_arrow(dictionary_tables))
+        context.register("dictionary.columns", pl.from_arrow(dictionary_columns))
+        context.register("dictionary_tables", pl.from_arrow(dictionary_tables))
+        context.register("dictionary_columns", pl.from_arrow(dictionary_columns))
+        return context
+
+    @staticmethod
+    def _is_dictionary_reserved_name(name: str) -> bool:
+        return _dataset_key(name) in {"DICTIONARY", "DICTIONARY.TABLES", "DICTIONARY.COLUMNS"}
+
     def _normalize_sort_key(self, table: pa.Table, by: str | Sequence[str]) -> tuple[str | list[tuple[str, str]], tuple[str, ...]]:
         if isinstance(by, str):
             resolved_name = self._resolve_column_name(table, by, parameter_name="sort")
@@ -1049,7 +1262,7 @@ class Session:
             unique_rows.append(dict(row))
 
         deduped = pa.Table.from_pylist(unique_rows)
-        return cls._preserve_arrow_metadata(table, deduped)
+        return preserve_arrow_metadata(table, deduped)
 
     @staticmethod
     def _iter_dataset_names(names: Sequence[str | Sequence[str]]) -> Iterable[str]:
@@ -1064,51 +1277,6 @@ class Session:
                     yield nested
                 continue
             raise TypeError("Dataset names must be strings or sequences of strings.")
-
-    @staticmethod
-    def _preserve_arrow_metadata(source: pa.Table, target: pa.Table) -> pa.Table:
-        return Session._restore_arrow_schema_from_sources(target, source_tables=(source,))
-
-    @staticmethod
-    def _polars_result_to_arrow(result: Any, *source_tables: pa.Table) -> pa.Table:
-        if hasattr(result, "collect"):
-            result = result.collect()
-        return Session._restore_arrow_schema_from_sources(result.to_arrow(), source_tables=source_tables)
-
-    @staticmethod
-    def _restore_arrow_schema_from_sources(target: pa.Table, *, source_tables: Sequence[pa.Table]) -> pa.Table:
-        if not source_tables:
-            return target
-
-        target_schema = target.schema
-        source_fields: dict[str, pa.Field] = {}
-        ambiguous_fields: set[str] = set()
-
-        for source in source_tables:
-            for field in source.schema:
-                field_key = _column_key(field.name)
-                existing_field = source_fields.get(field_key)
-                if existing_field is None:
-                    source_fields[field_key] = field
-                    continue
-                if existing_field.metadata != field.metadata:
-                    ambiguous_fields.add(field_key)
-
-        fields = []
-        for field in target_schema:
-            field_key = _column_key(field.name)
-            source_field = None if field_key in ambiguous_fields else source_fields.get(field_key)
-            if source_field is None or source_field.metadata is None:
-                fields.append(field)
-                continue
-            fields.append(field.with_metadata(source_field.metadata))
-
-        schema_metadata = target_schema.metadata
-        if len(source_tables) == 1 and source_tables[0].schema.metadata is not None:
-            schema_metadata = source_tables[0].schema.metadata
-
-        schema = pa.schema(fields, metadata=schema_metadata)
-        return pa.Table.from_arrays([target.column(index) for index in range(target.num_columns)], schema=schema)
 
     @staticmethod
     def _resolve_polars_dtype(dtype: Any) -> Any:
@@ -1137,10 +1305,3 @@ class Session:
         if resolved is None:
             raise ValueError(f"Unsupported dtype for DatasetView.astype: {dtype}")
         return resolved
-
-    @classmethod
-    def _extract_sql_target(cls, query: str) -> tuple[str | None, str]:
-        matched = cls._CREATE_TABLE_SQL.match(query)
-        if matched is None:
-            return None, query
-        return matched.group(1), matched.group(2).strip()

@@ -10,7 +10,9 @@ import math
 import re
 from typing import Any, Callable, Optional
 
-from .models import Diagnostic
+from ._naming import _column_key
+from .format_registry import FormatRegistry
+from .models import Diagnostic, DiagnosticLabel, DiagnosticSpan
 
 
 
@@ -26,6 +28,10 @@ class RuntimeExecutionError(Exception):
 class FunctionArgumentError(Exception):
     """Raised when a supported function receives invalid arguments."""
 
+    def __init__(self, message: str, diagnostic: Diagnostic | None = None) -> None:
+        super().__init__(message)
+        self.diagnostic = diagnostic
+
 
 class RuntimeContext:
     """Represents the PDV (Program Data Vector) execution context
@@ -38,6 +44,7 @@ class RuntimeContext:
     def __init__(self) -> None:
         """Initialize an empty runtime context"""
         self._variables: dict[str, Any] = {}
+        self._original_names: dict[str, str] = {}
 
     def get_variable(self, name: str) -> Optional[Any]:
         """Get variable value from context
@@ -48,7 +55,17 @@ class RuntimeContext:
         Returns:
             Variable value, or None if variable does not exist
         """
-        return self._variables.get(name)
+        return self._variables.get(_column_key(name))
+
+    def remember_variable_name(self, name: str) -> str:
+        """Remember the first-seen display name for a normalized variable key."""
+        key = _column_key(name)
+        self._original_names.setdefault(key, name)
+        return self._original_names[key]
+
+    def original_name(self, name: str) -> str | None:
+        """Return the remembered display name for a variable, if known."""
+        return self._original_names.get(_column_key(name))
 
     def set_variable(self, name: str, value: Any) -> None:
         """Set variable value in context
@@ -57,7 +74,9 @@ class RuntimeContext:
             name: Variable name to set
             value: Value to assign to the variable
         """
-        self._variables[name] = value
+        key = _column_key(name)
+        self._variables[key] = value
+        self.remember_variable_name(name)
 
     def has_variable(self, name: str) -> bool:
         """Check if variable exists in context
@@ -68,7 +87,7 @@ class RuntimeContext:
         Returns:
             True if variable exists, False otherwise
         """
-        return name in self._variables
+        return _column_key(name) in self._variables
 
 
 class ProgramExecutionService:
@@ -94,18 +113,7 @@ class ProgramExecutionService:
 
 
 class PDVRuntimeService:
-    """Service for managing PDV runtime execution
-    
-    This service implements the PDV lifecycle management, including:
-    - Context creation with automatic variables
-    - Row iteration with _N_ incrementing
-    - Error state management with _ERROR_ flag
-    
-    Follows DATA step semantics where:
-    - _N_ starts at 0 and increments at the start of each row
-    - _ERROR_ is reset to 0 at the start of each row
-    - Variables persist across rows (PDV retention)
-    """
+    """Service for managing PDV runtime execution."""
 
     # Automatic variable names per DATA step convention
     _AUTO_VAR_N = "_N_"
@@ -128,10 +136,32 @@ class PDVRuntimeService:
         self._function_registry.reset_state()
         return context
 
-    def __init__(self) -> None:
-        self._function_registry = FunctionRegistryService()
+    def _build_condition_scope(
+        self,
+        *,
+        row: Mapping[str, Any],
+        context: RuntimeContext,
+        include_row_aliases: bool,
+    ) -> dict[str, Any]:
+        scope = dict(row)
+        if include_row_aliases:
+            for column_name, value in row.items():
+                scope.setdefault(_column_key(column_name), value)
+                scope.setdefault(column_name.lower(), value)
+
+        scope[self._AUTO_VAR_N] = context.get_variable(self._AUTO_VAR_N)
+        scope[self._AUTO_VAR_ERROR] = context.get_variable(self._AUTO_VAR_ERROR)
+        scope["_n_"] = context.get_variable(self._AUTO_VAR_N)
+        scope["_error_"] = context.get_variable(self._AUTO_VAR_ERROR)
+        scope["__var__"] = lambda key: self._resolve_row_value(row, key)
+        scope.update(self._function_registry.get_eval_scope())
+        return scope
+
+    def __init__(self, format_registry: FormatRegistry | None = None) -> None:
+        self._function_registry = FunctionRegistryService(format_registry=format_registry)
         self._compiled_condition_cache: dict[str, Any] = {}
         self._transformed_condition_cache: dict[tuple[str, tuple[str, ...]], str] = {}
+
     def set_row_view(self, row_index: int, rows: list[dict[str, Any]]) -> None:
         self._function_registry.set_row_view(row_index=row_index, rows=rows)
 
@@ -267,6 +297,56 @@ class PDVRuntimeService:
 
         routed_outputs[target].append(dict(row))
 
+    def register_row_names(self, context: RuntimeContext, row: Mapping[str, Any]) -> None:
+        """Remember the display names of all variables currently present in a row."""
+        for name in row.keys():
+            context.remember_variable_name(name)
+
+    def has_row_name(self, row: Mapping[str, Any], name: str) -> bool:
+        """Return whether a row already contains a variable, case-insensitively."""
+        if name in row:
+            return True
+
+        normalized = _column_key(name)
+        return any(_column_key(candidate) == normalized for candidate in row.keys())
+
+    def resolve_row_name(self, row: Mapping[str, Any], context: RuntimeContext, name: str) -> str:
+        """Resolve a variable name to the row's canonical display name."""
+        if name in row:
+            context.remember_variable_name(name)
+            return name
+
+        original = context.original_name(name)
+        if original is not None and original in row:
+            return original
+
+        normalized = _column_key(name)
+        for candidate in row.keys():
+            if _column_key(candidate) == normalized:
+                context.remember_variable_name(candidate)
+                return candidate
+
+        return context.remember_variable_name(name)
+
+    def get_row_value(self, row: Mapping[str, Any], context: RuntimeContext, name: str) -> Any:
+        """Resolve and return a row variable value, case-insensitively."""
+        resolved = self.resolve_row_name(row, context, name)
+        return row.get(resolved)
+
+    def set_row_value(self, row: dict[str, Any], context: RuntimeContext, name: str, value: Any) -> str:
+        """Set a row variable while preserving the original display name."""
+        resolved = self.resolve_row_name(row, context, name)
+        row[resolved] = value
+        context.set_variable(resolved, value)
+        return resolved
+
+    def export_row(self, row: Mapping[str, Any], context: RuntimeContext) -> dict[str, Any]:
+        """Return a row snapshot using remembered display names for each variable."""
+        exported: dict[str, Any] = {}
+        for name, value in row.items():
+            exported[context.original_name(name) or name] = value
+        return exported
+
     def _evaluate_condition(
         self,
         row: Mapping[str, Any],
@@ -286,15 +366,6 @@ class PDVRuntimeService:
                 )
             self._transformed_condition_cache[transform_cache_key] = transformed_expression
 
-        scope = dict(row)
-        scope[self._AUTO_VAR_N] = context.get_variable(self._AUTO_VAR_N)
-        scope[self._AUTO_VAR_ERROR] = context.get_variable(self._AUTO_VAR_ERROR)
-        scope["_n_"] = context.get_variable(self._AUTO_VAR_N)
-        scope["_error_"] = context.get_variable(self._AUTO_VAR_ERROR)
-        scope["__var__"] = lambda key: row.get(key)
-        # include built‑in and local functions via registry scope
-        scope.update(self._function_registry.get_eval_scope())
-
         unsupported_function = self._function_registry.find_unsupported_function(expression)
         if unsupported_function is not None:
             self.set_error(context, unsupported_function)
@@ -312,7 +383,13 @@ class PDVRuntimeService:
             if compiled is None:
                 compiled = compile(transformed_expression, "<limulus-condition>", "eval")
                 self._compiled_condition_cache[transformed_expression] = compiled
-            return bool(eval(compiled, {"__builtins__": {}}, scope))
+
+            scope = self._build_condition_scope(row=row, context=context, include_row_aliases=False)
+            try:
+                return bool(eval(compiled, {"__builtins__": {}}, scope))
+            except NameError:
+                fallback_scope = self._build_condition_scope(row=row, context=context, include_row_aliases=True)
+                return bool(eval(compiled, {"__builtins__": {}}, fallback_scope))
         except SyntaxError as error:
             self.set_error(context, str(error))
             raise RuntimeExecutionError(
@@ -325,13 +402,28 @@ class PDVRuntimeService:
             ) from error
         except FunctionArgumentError as error:
             self.set_error(context, str(error))
-            raise RuntimeExecutionError(
-                Diagnostic(
+            diagnostic = error.diagnostic
+            if diagnostic is None:
+                diagnostic = Diagnostic(
                     code="RUNTIME_FUNCTION_ARGUMENT_INVALID",
                     severity="error",
                     location=self._row_location(context),
                     message=f"Invalid function arguments in expression '{expression}': {error}",
                 )
+            elif not diagnostic.location:
+                diagnostic = Diagnostic(
+                    code=diagnostic.code,
+                    severity=diagnostic.severity,
+                    message=diagnostic.message,
+                    location=self._row_location(context),
+                    stage=diagnostic.stage,
+                    span=diagnostic.span,
+                    labels=diagnostic.labels,
+                    notes=diagnostic.notes,
+                    source_text=diagnostic.source_text,
+                )
+            raise RuntimeExecutionError(
+                diagnostic
             ) from error
         except NameError as error:
             self.set_error(context, str(error))
@@ -354,22 +446,55 @@ class PDVRuntimeService:
                 )
             ) from error
 
+    def _build_condition_scope(
+        self,
+        *,
+        row: Mapping[str, Any],
+        context: RuntimeContext,
+        include_row_aliases: bool,
+    ) -> dict[str, Any]:
+        scope = dict(row)
+        if include_row_aliases:
+            for column_name, value in row.items():
+                scope.setdefault(_column_key(column_name), value)
+                scope.setdefault(column_name.lower(), value)
+
+        scope[self._AUTO_VAR_N] = context.get_variable(self._AUTO_VAR_N)
+        scope[self._AUTO_VAR_ERROR] = context.get_variable(self._AUTO_VAR_ERROR)
+        scope["_n_"] = context.get_variable(self._AUTO_VAR_N)
+        scope["_error_"] = context.get_variable(self._AUTO_VAR_ERROR)
+        scope["__var__"] = lambda key: self._resolve_row_value(row, key)
+        scope.update(self._function_registry.get_eval_scope())
+        return scope
+
     def _row_location(self, context: RuntimeContext) -> str:
         row_number = context.get_variable(self._AUTO_VAR_N)
         if isinstance(row_number, int):
             return f"row:{row_number}"
         return "row:0"
 
+    @staticmethod
+    def _resolve_row_value(row: Mapping[str, Any], key: str) -> Any:
+        if key in row:
+            return row.get(key)
+
+        normalized = _column_key(key)
+        for candidate, value in row.items():
+            if _column_key(candidate) == normalized:
+                return value
+        return None
+
 
 class FunctionRegistryService:
     _FUNCTION_PATTERN = re.compile(r"\b([A-Za-z_]\w*)\s*\(")
 
-    def __init__(self) -> None:
+    def __init__(self, format_registry: FormatRegistry | None = None) -> None:
         # Registry no longer used for user functions; kept for internal hooks
         self._registered_functions: dict[str, Any] = {}
         self._lag_queues: dict[int, list[Any]] = {}
         self._row_index = 0
         self._rows: list[dict[str, Any]] = []
+        self._format_registry = format_registry or FormatRegistry()
         self._functions: dict[str, Any] = {
             "__dsl_concat__": self._dsl_concat,
             "prxmatch": self._prxmatch,
@@ -419,7 +544,18 @@ class FunctionRegistryService:
             "mdy": self._mdy,
             "year": self._year,
             "intck": self._intck,
+            "put": self._put,
+            "input": self._input,
+            "hour": self._hour,
         }
+        self._eval_scope = dict(self._functions)
+        for name, function in self._functions.items():
+            self._eval_scope.setdefault(_column_key(name), function)
+        self._supported_function_names = {_column_key(name) for name in self._functions}
+        self._reserved_function_names = {_column_key(keyword) for keyword in {"and", "or", "not", "in"}}
+
+    def list_registered_function_names(self) -> tuple[str, ...]:
+        return tuple(sorted(self._functions.keys()))
 
     def _dsl_concat(self, left: Any, right: Any) -> str:
         def to_text(value: Any) -> str:
@@ -440,18 +576,15 @@ class FunctionRegistryService:
         self._rows = rows
 
     def get_eval_scope(self) -> dict[str, Any]:
-        # only built-in functions are provided; user-defined functions
-        # should be resolved via Python scope lookup in _apply or through
-        # the eval scope provider when expressions are evaluated.
-        return dict(self._functions)
+        return self._eval_scope
 
 
     def find_unsupported_function(self, expression: str) -> str | None:
         for name in self._FUNCTION_PATTERN.findall(expression):
-            lowered = name.lower()
-            if lowered in {"and", "or", "not", "in"}:
+            normalized = _column_key(name)
+            if normalized in self._reserved_function_names:
                 continue
-            if lowered not in self._functions:
+            if normalized not in self._supported_function_names:
                 return name
         return None
 
@@ -480,38 +613,124 @@ class FunctionRegistryService:
             pattern_body = raw[1:last_delimiter]
             flags_part = raw[last_delimiter + 1 :]
             try:
-                return re.compile(pattern_body, self._parse_regex_flags(flags_part))
+                return re.compile(
+                    pattern_body,
+                    self._parse_regex_flags(
+                        flags_part,
+                        source_text=raw,
+                        flags_offset=last_delimiter + 1,
+                        source_id="<prxmatch-pattern>",
+                    ),
+                )
             except re.error as error:
-                raise FunctionArgumentError(f"Invalid prxmatch pattern: {pattern}") from error
+                raise FunctionArgumentError(
+                    f"Invalid prxmatch pattern: {pattern}",
+                    diagnostic=self._build_regex_parse_diagnostic(
+                        message=f"Invalid prxmatch pattern: {pattern}",
+                        source_text=raw,
+                        source_id="<prxmatch-pattern>",
+                        start=1 + self._regex_error_offset(error),
+                        end=2 + self._regex_error_offset(error),
+                        label_message="regex syntax",
+                        notes=(str(error),),
+                    ),
+                ) from error
         try:
             return re.compile(raw)
         except re.error as error:
-            raise FunctionArgumentError(f"Invalid prxmatch pattern: {pattern}") from error
+            raise FunctionArgumentError(
+                f"Invalid prxmatch pattern: {pattern}",
+                diagnostic=self._build_regex_parse_diagnostic(
+                    message=f"Invalid prxmatch pattern: {pattern}",
+                    source_text=raw,
+                    source_id="<prxmatch-pattern>",
+                    start=self._regex_error_offset(error),
+                    end=self._regex_error_offset(error) + 1,
+                    label_message="regex syntax",
+                    notes=(str(error),),
+                ),
+            ) from error
 
     def _parse_prxchange_pattern(self, pattern: Any) -> tuple[re.Pattern[str], str]:
         raw = str(pattern)
         if not raw.startswith("s/"):
-            raise FunctionArgumentError("prxchange pattern must start with s/")
+            raise FunctionArgumentError(
+                "prxchange pattern must start with s/",
+                diagnostic=self._build_regex_parse_diagnostic(
+                    message="prxchange pattern must start with s/",
+                    source_text=raw,
+                    source_id="<prxchange-pattern>",
+                    start=0,
+                    end=min(2, max(len(raw), 1)),
+                    label_message="expected s/",
+                ),
+            )
 
         first_separator = raw.find("/", 2)
         if first_separator < 0:
-            raise FunctionArgumentError("prxchange pattern is missing replacement separator")
+            raise FunctionArgumentError(
+                "prxchange pattern is missing replacement separator",
+                diagnostic=self._build_regex_parse_diagnostic(
+                    message="prxchange pattern is missing replacement separator",
+                    source_text=raw,
+                    source_id="<prxchange-pattern>",
+                    start=0,
+                    end=max(len(raw), 1),
+                    label_message="missing separator",
+                ),
+            )
         second_separator = raw.find("/", first_separator + 1)
         if second_separator < 0:
-            raise FunctionArgumentError("prxchange pattern is missing closing separator")
+            raise FunctionArgumentError(
+                "prxchange pattern is missing closing separator",
+                diagnostic=self._build_regex_parse_diagnostic(
+                    message="prxchange pattern is missing closing separator",
+                    source_text=raw,
+                    source_id="<prxchange-pattern>",
+                    start=first_separator + 1,
+                    end=max(len(raw), first_separator + 2),
+                    label_message="missing closing separator",
+                ),
+            )
 
         regex_body = raw[2:first_separator]
         replacement = raw[first_separator + 1 : second_separator]
         flags_part = raw[second_separator + 1 :]
         try:
-            compiled = re.compile(regex_body, self._parse_regex_flags(flags_part))
+            compiled = re.compile(
+                regex_body,
+                self._parse_regex_flags(
+                    flags_part,
+                    source_text=raw,
+                    flags_offset=second_separator + 1,
+                    source_id="<prxchange-pattern>",
+                ),
+            )
         except re.error as error:
-            raise FunctionArgumentError(f"Invalid prxchange pattern: {pattern}") from error
+            raise FunctionArgumentError(
+                f"Invalid prxchange pattern: {pattern}",
+                diagnostic=self._build_regex_parse_diagnostic(
+                    message=f"Invalid prxchange pattern: {pattern}",
+                    source_text=raw,
+                    source_id="<prxchange-pattern>",
+                    start=2 + self._regex_error_offset(error),
+                    end=3 + self._regex_error_offset(error),
+                    label_message="regex syntax",
+                    notes=(str(error),),
+                ),
+            ) from error
         return compiled, replacement
 
-    def _parse_regex_flags(self, flags_part: str) -> int:
+    def _parse_regex_flags(
+        self,
+        flags_part: str,
+        *,
+        source_text: str,
+        flags_offset: int,
+        source_id: str,
+    ) -> int:
         flags = 0
-        for flag_char in flags_part:
+        for index, flag_char in enumerate(flags_part):
             lowered = flag_char.lower()
             if lowered == "i":
                 flags |= re.IGNORECASE
@@ -525,8 +744,70 @@ class FunctionRegistryService:
             if lowered == "x":
                 flags |= re.VERBOSE
                 continue
-            raise FunctionArgumentError(f"Unsupported PRX flag: {flag_char}")
+            start = flags_offset + index
+            raise FunctionArgumentError(
+                f"Unsupported PRX flag: {flag_char}",
+                diagnostic=self._build_regex_parse_diagnostic(
+                    message=f"Unsupported PRX flag: {flag_char}",
+                    source_text=source_text,
+                    source_id=source_id,
+                    start=start,
+                    end=start + 1,
+                    label_message="unsupported flag",
+                    notes=("Supported flags: i, m, s, x.",),
+                ),
+            )
         return flags
+
+    def _build_regex_parse_diagnostic(
+        self,
+        *,
+        message: str,
+        source_text: str,
+        source_id: str,
+        start: int,
+        end: int,
+        label_message: str,
+        notes: tuple[str, ...] = (),
+    ) -> Diagnostic:
+        span = self._regex_span(source_text, start, end, source_id=source_id)
+        return Diagnostic(
+            code="RUNTIME_FUNCTION_ARGUMENT_INVALID",
+            severity="error",
+            message=message,
+            span=span,
+            labels=(DiagnosticLabel(span=span, message=label_message),),
+            notes=notes,
+            source_text=source_text,
+        )
+
+    @staticmethod
+    def _regex_error_offset(error: re.error) -> int:
+        position = getattr(error, "pos", 0)
+        if not isinstance(position, int):
+            return 0
+        return max(position, 0)
+
+    @staticmethod
+    def _regex_span(source_text: str, start: int, end: int, *, source_id: str) -> DiagnosticSpan:
+        safe_start = max(min(start, len(source_text)), 0)
+        safe_end = max(min(end, len(source_text)), safe_start + 1)
+        prefix = source_text[:safe_start]
+        line = prefix.count("\n") + 1
+        last_newline = prefix.rfind("\n")
+        column = safe_start + 1 if last_newline < 0 else safe_start - last_newline
+        segment = source_text[safe_start:safe_end]
+        end_line = line + segment.count("\n")
+        end_column = column + max(safe_end - safe_start, 1) if "\n" not in segment else None
+        return DiagnosticSpan(
+            start=safe_start,
+            end=safe_end,
+            line=line,
+            column=column,
+            end_line=end_line,
+            end_column=end_column,
+            source_id=source_id,
+        )
 
     def _substr(self, value: Any, start: Any, length: Any | None = None) -> str:
         source = "" if value is None else str(value)
@@ -820,6 +1101,15 @@ class FunctionRegistryService:
 
     def _mdy(self, month: Any, day: Any, year: Any) -> dt.date:
         return dt.date(int(year), int(month), int(day))
+
+    def _put(self, value: Any, format_name: Any) -> Any:
+        return self._format_registry.put(value, format_name)
+
+    def _input(self, value: Any, informat_name: Any) -> Any:
+        return self._format_registry.input(value, informat_name)
+
+    def _hour(self, value: Any) -> Any:
+        return self._format_registry.hour(value)
 
     def _year(self, value: Any) -> int:
         if isinstance(value, dt.datetime):

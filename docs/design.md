@@ -23,28 +23,46 @@ Rather than rarely-used edge cases or SAS language-specific quirks, it prioritiz
 Session.submit()
   -> DataStepExecutor.execute()
     -> ExecutionPipelineCoordinator
-      1) split blocks
-      2) macro hook
+      1) macro hook / unsupported syntax skip
+      2) split blocks
       3) parse
-      4) resolve inputs
-      5) pre-processing inputs
-      6) pre-evaluations
-      7) execute runtime backend
-      8) resolve outputs (temporary/internal variable filtering)
-    -> Output conversion (arrow_table)
+      4) validate
+      5) resolve inputs
+      6) pre-processing inputs
+      7) pre-evaluations
+      8) plan generation
+      9) execute runtime backend
+     10) resolve outputs (temporary/internal variable filtering)
+     11) apply output metadata
   -> Session.datasets update
 ```
 
 
-### 1. Block Splitting
+### 1. Unsupported PROC / Macro Skip
+Before block splitting, limulus masks a narrow subset of unsupported legacy syntax so mixed source files can still reach the Data Step parser.
+
+Current skip scope:
+
+- `%let ...;`
+- `%put ...;`
+- `%* ...;` macro comments
+- `%macro ... %mend;` and `%macro ... %mend name;`
+- `proc ... run;` and `proc ... quit;`
+
+These constructs are skipped rather than executed. Open-code macro expansion and procedure semantics are still outside the supported surface.
+
+### 2. Block Splitting
 Code passed to `submit()` is split into `DATA ... RUN;` units and executed sequentially.  
 This means that when multiple blocks are passed at once, the output of an earlier block can be referenced as input by subsequent blocks.
 
-### 2. Parsing
+### 3. Parsing
 Data Step code is currently parsed using [lark](https://github.com/lark-parser/lark).
 
-For example, code like `data out; set iris(in=in1) ; where sepal_length > 5; if species ^= 'setosa'; keep species sepal_length sepal_width ;run;` is currently parsed as follows:
-```
+The parser builds an internal structured representation that is then shared by both the Python and Rust runtimes. 
+
+For example, code like `data out; set iris(in=in1) ; where sepal_length > 5; if species ^= 'setosa'; keep species sepal_length sepal_width ;run;` is currently recognized as the following statement structure:
+
+```text
 start
   statement
     data_stmt
@@ -70,7 +88,9 @@ start
     run_stmt	run
 ```
 
-### 3. Input Resolution
+The exact internal rule names may evolve over time, but the important point is that statements, dataset references, and options are separated before execution starts.
+
+### 4. Input Resolution
 
 References specified in `SET` / `MERGE` are resolved in the following order:
 
@@ -78,9 +98,9 @@ References specified in `SET` / `MERGE` are resolved in the following order:
 - Inputs registered via `Session.loads()`
 - Outputs produced by earlier blocks within the same `submit()` call
 
-Name resolution is case-insensitive and handles the `work.` prefix transparently.
+Dataset name resolution is case-insensitive and handles the `work.` prefix transparently. Column-oriented helpers such as `select`, `where`, `transpose`, `assign`, and `cast` also resolve column names case-insensitively when the match is unique.
 
-### 4. Backend Selection
+### 5. Backend Selection
 Row-oriented processing tends to be less efficient than column-oriented processing.  
 To improve execution speed, a Rust-based runtime module is provided.  
 The Rust backend is used by default.  
@@ -88,7 +108,19 @@ However, if a diagnostic error occurs for cases that cannot be handled by the Ru
 
 Input-stage dataset options such as `keep=`, `drop=`, `where=`, `rename=`, `firstobs=`, and `obs=` are normalized in shared Python-side preprocessing before the runtime loop when needed. This keeps the row-loop semantics consistent across Python and Rust backends without duplicating the same preparation rules in multiple runtimes.
 
-### 5. Row Loop Processing
+### 6. Session Helpers and Metadata Views
+
+In addition to `submit()`, `Session` and `DatasetView` provide user-facing helpers for common column-oriented tasks.
+
+- `transpose(...)` offers a compact reshape helper for common wide/long conversions.
+- `assign(...)` adds or replaces columns from expressions, literals, and `case when` logic while keeping left-to-right assignment order.
+- `assign(...)` and the DSL both support limited built-in `put(...)`, `input(...)`, and `hour(...)` conversion helpers.
+- `Session` maintains a shared format / informat registry. Built-in families cover `best.` / `w.` / `w.d` / `w.d.`, `zw.` / `zw.d` / `zw.d.`, `commaw.` / `commaw.d` / `commaw.d.`, and named forms such as `e8601da.`, `e8601dt.`, `yymmdd6.`, `yymmdd8.`, `yymmdd10.`, and `time.`. 
+- `astype(...)` / `cast(...)` remain helper-oriented type conversion APIs, can materialize into a new dataset by using `out=`, and can write cast results into new columns by using `alias=`.
+- `sql(...)` provides practical session-level querying, including read queries, `CREATE TABLE ... AS ...`, and `DROP TABLE ...`.
+- `dictionary.tables`, `dictionary.columns`, and dataset-scoped dictionary views expose session metadata such as labels, row counts, and Arrow column types.
+
+### 7. Row Loop Processing
 Manages the basic per-row loop processing and its associated automatic variables.
 
 - `_N_`: incremented on each row iteration
@@ -98,7 +130,7 @@ Manages the basic per-row loop processing and its associated automatic variables
 - Output destination is controlled with `DATA out1 out2;` and `OUTPUT out1;`
 - If no explicit `OUTPUT` is present, the default output destination (usually the first DATA target) is used
 
-### 6. Output Conversion and Session Update
+### 8. Output Conversion and Session Update
 Processed results are converted to `arrow_table` and then reflected in the catalog.  
 This allows `session["name"]` to be retrieved as an Arrow Table.
 
@@ -107,10 +139,12 @@ This includes helper variables created by `IN=`, `INDSNAME=`, `END=`, and `FIRST
 
 Dataset labels are stored in Arrow schema metadata under `memlabel`, and column labels are stored in each Arrow field's custom metadata. This allows label information produced by `DATA ... (label="...")` and `LABEL` statements to survive round-trips through `Session`.
 
-### 7. Stage-aware Diagnostics and Logs
+### 9. Stage-aware Diagnostics and Logs
 
 Pipeline diagnostics keep stage information as a dedicated field (`stage`) rather than embedding it in diagnostic messages.
 `Session.submit()` propagates this value into log entries so each log line can identify the pipeline stage independently.
+
+When source text is available, log output also includes short source excerpts. This makes parse, validation, and execution errors easier to read without requiring users to inspect internal parser details.
 
 
 ## Input Data
@@ -125,6 +159,8 @@ Internally, limulus uses Arrow for data exchange, so Arrow or Polars inputs are 
 Handling large datasets is a key motivation for using Python, so performance is an explicit design consideration.
 
 Row-oriented processing is inherently slower than columnar processing, which operates on entire columns at once.  
+For that reason, the main Data Step runtime focuses on predictable row-loop semantics, while user-facing helpers such as `assign()` can use a column-oriented expression path for supported syntax.
+
 For reference, limulus uses the following iris-like neutral scenario for benchmark comparisons:  
 
 
@@ -148,14 +184,14 @@ run;
 ```
 
 With the Rust runtime, processing time is reduced to about half compared with the Python backend.  
-Compared with column-oriented processing in pandas or polars, limulus is at a disadvantage because those libraries can process entire columns in bulk. However, when compared against row-wise patterns such as `iterrows`, performance drops sharply in pandas, and the Rust runtime in limulus still runs faster than pandas `iterrows`.
+Compared with column-oriented processing in pandas or polars, limulus is at a disadvantage because those libraries can process entire columns in bulk. However, when compared against row-wise patterns such as `iterrows`, performance drops sharply in pandas, and the Rust runtime in limulus still runs faster than pandas `iterrows`.  
+For simple operations, using `assign` allows for column-oriented processing, resulting in high performance. You should consider this approach when working with very large datasets.
 
-
-| rows | limulus rust(ms) | limulus python(ms) | pandas(ms) | polars(ms) | pandas iterrows(ms) | polars iterrows(ms) |
-|---:|---:|---:|---:|---:|---:|---:|
-| 10000 | 87.70 | 201.63 | 2.38 | 1.62 | 141.35 | 8.78 |
-| 100000 | 757.76 | 1952.34 | 8.86 | 3.05 | 1432.81 | 89.39 |
-| 1000000 | 8640.51 | 20336.69 | 112.09 | 30.96 | 14621.46 | 884.21 |
+| rows | limulus rust(ms) | limulus python(ms) | limulus assign(ms) |pandas(ms) | polars(ms) | pandas iterrows(ms) | polars iterrows(ms) |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 10000 | 82.42 | 287.21 | 14.73 |3.24 | 2.80 | 138.39 | 8.07 |
+| 100000 | 813.52 | 2825.89 | 4.96 |7.77 | 2.48 | 1381.17 | 87.31 |
+| 1000000 | 8556.33 | 28125.39 | 101.71 |134.70 | 30.57 | 13851.41 | 861.90 |
 
 
 ---
@@ -165,20 +201,24 @@ Compared with column-oriented processing in pandas or polars, limulus is at a di
 
 ### Short-term (v0.x)
 
-1. Improved stability (bug fixes, expanded parser coverage, etc.)
-2. Additional supported functions (string-related, `put`, etc.)
-3. Column-oriented API additions (basic data operations, SQL query execution)
-4. Performance improvements in non-runtime processing areas
-5. Support for label-based metadata settings
+- [ ] Improved stability (bug fixes, expanded parser coverage, etc.)
+  Parser/runtime coverage and validation have improved.
+- [ ] Additional supported functions (string-related, `put`, etc.)
+- [x] Broader helper coverage and improved ergonomics around the existing column-oriented API
+- [ ] Performance improvements in non-runtime processing areas
+  Some pipeline cleanup and helper improvements have landed, but more work is still needed.
+- [x] Support for label-based metadata settings
 
 ### Mid-term (beta release v0.x – v1.0)
 
-1. Improved reliability through expanded and organized test coverage
-2. Enhanced logging and debugging capabilities
-3. Support for Dataset-JSON
+- [ ] Improved reliability through expanded and organized test coverage
+- [ ] Enhanced logging and debugging capabilities
+  Stage-aware and source-excerpt-based diagnostics are available, but deeper debugging support is still planned.
+- [x] Support for Dataset-JSON
+  [dsjframe](https://github.com/k-nkmt/dsjframe) has been released as a standalone library.
 
 ### Long-term (TBD)
 
-1. Support for macro variables and open-code macros
-2. Support for dictionary tables
-3. Further runtime performance improvements
+- [ ] Support for macro variables and open-code macros
+- [X] Support for dictionary tables
+- [ ] Further runtime performance improvements

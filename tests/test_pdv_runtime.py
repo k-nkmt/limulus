@@ -145,6 +145,16 @@ class TestPDVRuntimeVariableManagement:
 
         assert context.get_variable("nonexistent") is None
 
+    def test_variable_access_is_case_insensitive(self) -> None:
+        service = PDVRuntimeService()
+        context = service.create_context()
+
+        context.set_variable("Name", "Alice")
+
+        assert context.get_variable("name") == "Alice"
+        assert context.get_variable("NAME") == "Alice"
+        assert context.has_variable("name") is True
+
 
 class TestPDVRuntimeErrorHandling:
     """Test error state management"""
@@ -232,6 +242,13 @@ class TestPDVRuntimeStatementEvaluation:
 
         for case in scenario["where_cases"]:
             assert service.passes_where(case["row"], context, case["expr"]) is case["expected"]
+
+    def test_where_filter_resolves_input_row_keys_case_insensitively(self) -> None:
+        service = PDVRuntimeService()
+        context = service.create_context()
+
+        assert service.passes_where({"Amount": 10}, context, "amount >= 0") is True
+        assert service.passes_where({"Amount": -1}, context, "AMOUNT >= 0") is False
 
     def test_drop_and_keep_control_output_variables(self) -> None:
         scenario = PDV_RUNTIME_SCENARIOS["variable_and_expression_behavior"]

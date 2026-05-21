@@ -59,6 +59,7 @@ class RustArrowIOBridgeTests(unittest.TestCase):
         scenario = IO_BRIDGE_SCENARIOS["rust_arrow_bridge_input"]
         bridge = RustArrowIOBridge()
         table = _FakeArrowTable(scenario["stream_tag"])
+        execution_plan = {"kind": "placeholder", "steps": []}
         context = RuntimeExecutionContext(
             request=ExecuteRequest(dsl_text=scenario["dsl"]),
             ast_statements=(),
@@ -70,6 +71,7 @@ class RustArrowIOBridgeTests(unittest.TestCase):
                 ),
             },
             resolved_output_targets=scenario["resolved_output_targets"],
+            execution_plan=execution_plan,
         )
 
         payload, diagnostics = bridge.build_payload(context, function_registry_keys=())
@@ -78,6 +80,7 @@ class RustArrowIOBridgeTests(unittest.TestCase):
         self.assertIsNotNone(payload)
         assert payload is not None
         self.assertEqual(payload.input_streams["in"], scenario["stream_tag"])
+        self.assertEqual(payload.execution_plan, execution_plan)
         self.assertEqual(table.stream_calls, scenario["expected_stream_calls"])
         self.assertEqual(table.to_pylist_calls, scenario["expected_to_pylist_calls"])
 
@@ -108,17 +111,20 @@ class RustNativeBlockExecutorTests(unittest.TestCase):
         scenario = IO_BRIDGE_SCENARIOS["native_block_executor_io"]
         executor = RustNativeBlockExecutor()
         table = _FakeArrowTable(scenario["stream_tag"])
+        execution_plan = {"kind": "placeholder", "steps": ["loop"]}
         payload = RustExecutionPayload(
             ast_statements=[ParsedStatement(kind="SET", text="set in")],
             output_targets=(scenario["output_target"],),
             input_streams={"in": table.__arrow_c_stream__()},
             function_registry_keys=(),
+            execution_plan=execution_plan,
         )
 
         serialized, diagnostic = executor._serialize_payload(payload)
 
         self.assertIsNone(diagnostic)
         self.assertEqual(serialized["input_streams"]["in"], scenario["stream_tag"])
+        self.assertEqual(serialized["execution_plan"], execution_plan)
         self.assertNotIn("inputs", serialized)
         self.assertEqual(table.to_pylist_calls, 0)
 

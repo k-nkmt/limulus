@@ -4,6 +4,8 @@ from collections.abc import Iterator, Mapping, MutableMapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from ._naming import _dataset_key
+
 
 @dataclass(frozen=True)
 class DataSetRef:
@@ -14,12 +16,34 @@ class DataSetRef:
 
 
 @dataclass(frozen=True)
+class DiagnosticSpan:
+    start: int
+    end: int
+    line: int
+    column: int
+    end_line: int | None = None
+    end_column: int | None = None
+    source_id: str = "<dsl>"
+
+
+@dataclass(frozen=True)
+class DiagnosticLabel:
+    span: DiagnosticSpan
+    message: str = ""
+    kind: str = "primary"
+
+
+@dataclass(frozen=True)
 class Diagnostic:
     code: str
     severity: str
     message: str
     location: str = ""
     stage: str = ""
+    span: DiagnosticSpan | None = None
+    labels: tuple[DiagnosticLabel, ...] = field(default_factory=tuple)
+    notes: tuple[str, ...] = field(default_factory=tuple)
+    source_text: str | None = None
 
 
 @dataclass(frozen=True)
@@ -67,6 +91,17 @@ class LogEntry:
     message: str
     location: str = ""
     stage: str = ""
+    span: DiagnosticSpan | None = None
+    labels: tuple[DiagnosticLabel, ...] = field(default_factory=tuple)
+    notes: tuple[str, ...] = field(default_factory=tuple)
+    source_text: str | None = None
+
+
+@dataclass(frozen=True)
+class RenderRequest:
+    source_id: str = "<dsl>"
+    source_text: str | None = None
+    diagnostics: tuple[Diagnostic, ...] = field(default_factory=tuple)
 
 
 @dataclass
@@ -100,14 +135,36 @@ class SubmitResult:
             f"success: {self.success}",
             f"{round(self.elapsed_seq, 2)} seconds elapsed",
         ]
+        error_count = sum(1 for entry in self.log if entry.severity == "error")
+        if error_count:
+            lines.append(f"Error entries: {error_count}")
         if not self.log:
             lines.append("(no log entries)")
             return "\n".join(lines)
 
         for entry in self.log:
-            location_suffix = f" ({entry.location}) - " if entry.location else ""
-            stage_suffix = f" [stage: {entry.stage}]" if entry.stage else ""
-            lines.append(f"{location_suffix}{entry.severity.title()}\n{stage_suffix}: {entry.message}")
+            from .renderer import render_diagnostics
+
+            diagnostic = Diagnostic(
+                code=entry.code,
+                severity=entry.severity,
+                message=entry.message,
+                location=entry.location,
+                stage=entry.stage,
+                span=entry.span,
+                labels=entry.labels,
+                notes=entry.notes,
+                source_text=entry.source_text,
+            )
+            source_id = entry.span.source_id if entry.span is not None else "<dsl>"
+            rendered = render_diagnostics(
+                RenderRequest(
+                    source_id=source_id,
+                    source_text=entry.source_text,
+                    diagnostics=(diagnostic,),
+                )
+            )
+            lines.append(rendered)
         return "\n".join(lines)
 
     def print_log(self) -> None:
@@ -117,9 +174,12 @@ class SubmitResult:
 class DatasetCatalog(Mapping[str, Any]):
     def __init__(self) -> None:
         self._datasets: MutableMapping[str, Any] = {}
+        self._display_names: MutableMapping[str, str] = {}
 
     def set(self, name: str, table: Any) -> None:
-        self._datasets[self._normalize(name)] = table
+        normalized = self._normalize(name)
+        self._datasets[normalized] = table
+        self._display_names[normalized] = self._display_name(name)
 
     def update(self, datasets: Mapping[str, Any]) -> None:
         for name, table in datasets.items():
@@ -129,6 +189,7 @@ class DatasetCatalog(Mapping[str, Any]):
         normalized = self._normalize(name)
         if normalized in self._datasets:
             del self._datasets[normalized]
+            self._display_names.pop(normalized, None)
             return True
         if missing_ok:
             return False
@@ -138,7 +199,7 @@ class DatasetCatalog(Mapping[str, Any]):
         return self._datasets[self._normalize(name)]
 
     def __iter__(self) -> Iterator[str]:
-        return iter(self._datasets)
+        return iter(self._display_names.values())
 
     def __len__(self) -> int:
         return len(self._datasets)
@@ -150,17 +211,27 @@ class DatasetCatalog(Mapping[str, Any]):
 
     @staticmethod
     def _normalize(name: str) -> str:
-        return name.strip().lower()
+        return _dataset_key(name)
+
+    @staticmethod
+    def _display_name(name: str) -> str:
+        normalized = name.strip()
+        if normalized[:5].upper() == "WORK.":
+            return normalized[5:]
+        return normalized
 
 
 __all__ = [
     "DataSetRef",
+    "DiagnosticSpan",
+    "DiagnosticLabel",
     "Diagnostic",
     "ExecuteRequest",
     "ExecuteResponse",
     "OutputConversionResult",
     "CompatibilityNotice",
     "LogEntry",
+    "RenderRequest",
     "SubmitResult",
     "DatasetCatalog",
 ]

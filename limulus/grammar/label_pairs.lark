@@ -1,0 +1,10 @@
+start: label_pair+
+
+label_pair: NAME EQUALS STRING
+
+NAME: /[A-Za-z_][\w\.]*/
+EQUALS: "="
+STRING: /'(?:''|[^'])*'|"(?:""|[^"])*"/
+
+%import common.WS_INLINE
+%ignore WS_INLINE

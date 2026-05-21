@@ -21,6 +21,7 @@ class RuntimeExecutionContext:
     ast_statements: Sequence[Any]
     resolved_inputs: Mapping[str, DataSetRef]
     resolved_output_targets: tuple[str, ...]
+    execution_plan: Any | None = None
 
 
 @dataclass(frozen=True)
@@ -31,6 +32,7 @@ class RustExecutionPayload:
     legacy_inputs: Mapping[str, Any] = None
     prepared_merge_mode: bool = False
     function_registry_keys: tuple[str, ...] = ()
+    execution_plan: Any | None = None
 
     def __post_init__(self) -> None:
         if self.legacy_inputs is None:
@@ -157,6 +159,7 @@ class RustArrowIOBridge:
                 legacy_inputs=legacy_inputs,
                 prepared_merge_mode=prepared_merge_mode,
                 function_registry_keys=function_registry_keys,
+                execution_plan=context.execution_plan,
             ),
             diagnostics,
         )
@@ -467,6 +470,7 @@ class RustNativeBlockExecutor:
             "statements": statements,
             "output_targets": list(payload.output_targets),
             "input_streams": dict(payload.input_streams),
+            "execution_plan": payload.execution_plan,
         }
         if payload.legacy_inputs:
             serialized["inputs"] = dict(payload.legacy_inputs)

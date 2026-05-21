@@ -28,44 +28,45 @@ statement: data_stmt
 // --- Core statements ---
 data_stmt: data_kw dataset_ref+
 set_stmt: set_kw set_component+
-merge_stmt: /(?i)merge[^;]*/
-data_kw: /(?i)data/
-set_kw: /(?i)set/
+merge_stmt: merge_kw set_component+
+data_kw: /[dD][aA][tT][aA]/
+set_kw: /[sS][eE][tT]/
+merge_kw: /[mM][eE][rR][gG][eE]/
 set_component: dataset_ref
           | set_statement_option
 dataset_ref: dataset_name dataset_options?
 dataset_name: /[A-Za-z_][\w\.]*/
 dataset_options: "(" dataset_option+ ")"
-dataset_option: /(?i)[A-Za-z_][\w]*\s*=\s*(?:\((?:[^()]|\([^()]*\))*\)|"[^"]*"|'[^']*'|[^)\s]+(?:\s+(?![A-Za-z_][\w]*\s*=)[^)\s]+)*)/
-set_statement_option: /(?i)(indsname|end)\s*=\s*[A-Za-z_][\w\.]*/
+dataset_option: /[A-Za-z_][\w]*\s*=\s*(?:\((?:[^()]|\([^()]*\))*\)|"[^"]*"|'[^']*'|[^)\s]+(?:\s+(?![A-Za-z_][\w]*\s*=)[^)\s]+)*)/
+set_statement_option: /([iI][nN][dD][sS][nN][aA][mM][eE]|[eE][nN][dD])\s*=\s*[A-Za-z_][\w\.]*/
 
 if_stmt: if_then_do_stmt
     | if_then_stmt
     | subset_if_stmt
 else_if_stmt: else_if_then_do_stmt
          | else_if_then_stmt
-if_then_do_stmt: /(?i)if\b[^;]*\bthen\s+do\b[^;]*/
-if_then_stmt: /(?i)if\b[^;]*\bthen\b[^;]*/
-subset_if_stmt: /(?i)if\b(?![^;]*\bthen\b)[^;]*/
-else_if_then_do_stmt: /(?i)else\s*if\b[^;]*\bthen\s+do\b[^;]*/
-else_if_then_stmt: /(?i)else\s*if\b[^;]*\bthen\b[^;]*/
-else_stmt: /(?i)else[^;]*/
-where_stmt: /(?i)where[^;]*/
-by_stmt: /(?i)by[^;]*/
-output_stmt: /(?i)output[^;]*/
-drop_stmt: /(?i)drop[^;]*/
-keep_stmt: /(?i)keep[^;]*/
-delete_stmt: /(?i)delete/
-rename_stmt: /(?i)rename[^;]*/
-retain_stmt: /(?i)retain[^;]*/
-array_stmt: /(?i)array[^;]*/
-stop_stmt: /(?i)stop/
-do_stmt: /(?i)do/ /[^;]+/
-end_stmt: /(?i)end/
-run_stmt: /(?i)run/
+if_then_do_stmt: /[iI][fF]\b[^;]*\b[tT][hH][eE][nN]\s+[dD][oO]\b[^;]*/
+if_then_stmt: /[iI][fF]\b[^;]*\b[tT][hH][eE][nN]\b[^;]*/
+subset_if_stmt: /[iI][fF]\b(?![^;]*\b[tT][hH][eE][nN]\b)[^;]*/
+else_if_then_do_stmt: /[eE][lL][sS][eE]\s*[iI][fF]\b[^;]*\b[tT][hH][eE][nN]\s+[dD][oO]\b[^;]*/
+else_if_then_stmt: /[eE][lL][sS][eE]\s*[iI][fF]\b[^;]*\b[tT][hH][eE][nN]\b[^;]*/
+else_stmt: /[eE][lL][sS][eE][^;]*/
+where_stmt: /[wW][hH][eE][rR][eE][^;]*/
+by_stmt: /[bB][yY][^;]*/
+output_stmt: /[oO][uU][tT][pP][uU][tT][^;]*/
+drop_stmt: /[dD][rR][oO][pP][^;]*/
+keep_stmt: /[kK][eE][eE][pP][^;]*/
+delete_stmt: /[dD][eE][lL][eE][tT][eE]/
+rename_stmt: /[rR][eE][nN][aA][mM][eE][^;]*/
+retain_stmt: /[rR][eE][tT][aA][iI][nN][^;]*/
+array_stmt: /[aA][rR][rR][aA][yY][^;]*/
+stop_stmt: /[sS][tT][oO][pP]/
+do_stmt: /[dD][oO]/ /[^;]+/
+end_stmt: /[eE][nN][dD]/
+run_stmt: /[rR][uU][nN]/
 
-sum_stmt: /(?i)(?!\s*(if|else|where|data|set|merge|by|output|drop|keep|delete|rename|retain|array|stop|do|end|run|length|attrib|format|label|informat|attrib)\b)[A-Za-z_][\w\.]*\s*\+\s*[^;]+/
-assign_stmt: /(?i)(?!\s*(if|else|where|data|set|merge|by|output|drop|keep|delete|rename|retain|array|stop|do|end|run|length|attrib|format|label|informat|attrib)\b)[^;]*=[^;]*/
+sum_stmt: /(?!\s*(?:[iI][fF]|[eE][lL][sS][eE]|[wW][hH][eE][rR][eE]|[dD][aA][tT][aA]|[sS][eE][tT]|[mM][eE][rR][gG][eE]|[bB][yY]|[oO][uU][tT][pP][uU][tT]|[dD][rR][oO][pP]|[kK][eE][eE][pP]|[dD][eE][lL][eE][tT][eE]|[rR][eE][nN][aA][mM][eE]|[rR][eE][tT][aA][iI][nN]|[aA][rR][rR][aA][yY]|[sS][tT][oO][pP]|[dD][oO]|[eE][nN][dD]|[rR][uU][nN]|[lL][eE][nN][gG][tT][hH]|[aA][tT][tT][rR][iI][bB]|[fF][oO][rR][mM][aA][tT]|[lL][aA][bB][eE][lL]|[iI][nN][fF][oO][rR][mM][aA][tT])\b)[A-Za-z_][\w\.]*\s*\+\s*[^;]+/
+assign_stmt: /(?!\s*(?:[iI][fF]|[eE][lL][sS][eE]|[wW][hH][eE][rR][eE]|[dD][aA][tT][aA]|[sS][eE][tT]|[mM][eE][rR][gG][eE]|[bB][yY]|[oO][uU][tT][pP][uU][tT]|[dD][rR][oO][pP]|[kK][eE][eE][pP]|[dD][eE][lL][eE][tT][eE]|[rR][eE][nN][aA][mM][eE]|[rR][eE][tT][aA][iI][nN]|[aA][rR][rR][aA][yY]|[sS][tT][oO][pP]|[dD][oO]|[eE][nN][dD]|[rR][uU][nN]|[lL][eE][nN][gG][tT][hH]|[aA][tT][tT][rR][iI][bB]|[fF][oO][rR][mM][aA][tT]|[lL][aA][bB][eE][lL]|[iI][nN][fF][oO][rR][mM][aA][tT])\b)[^;]*=[^;]*/
 
 skipped_stmt: length_stmt
             | attrib_stmt
@@ -74,12 +75,12 @@ skipped_stmt: length_stmt
             | informat_stmt
             | call_stmt
 
-length_stmt: /(?i)length[^;]*/
-attrib_stmt: /(?i)attrib[^;]*/
-format_stmt: /(?i)format[^;]*/
-label_stmt: /(?i)label[^;]*/
-informat_stmt: /(?i)informat[^;]*/
-call_stmt: /(?i)call\b[^;]*/
+length_stmt: /[lL][eE][nN][gG][tT][hH][^;]*/
+attrib_stmt: /[aA][tT][tT][rR][iI][bB][^;]*/
+format_stmt: /[fF][oO][rR][mM][aA][tT][^;]*/
+label_stmt: /[lL][aA][bB][eE][lL][^;]*/
+informat_stmt: /[iI][nN][fF][oO][rR][mM][aA][tT][^;]*/
+call_stmt: /[cC][aA][lL][lL]\b[^;]*/
 
 LINE_COMMENT: /\*(?!\/)[^;]*;/
 BLOCK_COMMENT: /\/\*[\s\S]*?\*\//

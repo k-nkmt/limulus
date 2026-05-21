@@ -1,0 +1,18 @@
+start: array_stmt
+
+array_stmt: ARRAY NAME array_size? character_array? variable_list
+array_size: BRACKET_WILDCARD -> wildcard_size
+          | BRACKET_NUMBER   -> bracket_size
+          | SIZE_NUMBER      -> numeric_size
+character_array: DOLLAR
+variable_list: NAME+
+
+ARRAY.5: /[aA][rR][rR][aA][yY]/
+NAME: /[A-Za-z_][\w\.]*/
+BRACKET_WILDCARD: /\[\s*\*\s*\]/
+BRACKET_NUMBER: /\[\s*\d+\s*\]/
+SIZE_NUMBER: /\d+/
+DOLLAR: "$"
+
+%import common.WS
+%ignore WS

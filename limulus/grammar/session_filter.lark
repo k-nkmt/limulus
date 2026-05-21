@@ -1,0 +1,16 @@
+?start: filter_expr
+
+filter_expr: NAME FILTER_OP scalar
+
+?scalar: STRING        -> string_scalar
+       | NUMBER        -> number_scalar
+       | INVALID_VALUE -> invalid_scalar
+
+NAME.5: /[A-Za-z_][\w\.]*/
+FILTER_OP: ">=" | "<=" | "!=" | "==" | "=" | ">" | "<"
+STRING.5: /'(?:''|[^'])*'|"(?:""|[^"])*"/
+NUMBER.4: /[+-]?(?:\d+\.\d*|\d+|\.\d+)(?:[eE][+-]?\d+)?/
+INVALID_VALUE.1: /[^\s].*/
+
+%import common.WS_INLINE
+%ignore WS_INLINE

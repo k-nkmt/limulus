@@ -32,11 +32,6 @@ class PythonBackendExecutionService(_PythonStatementExecutionMixin, _PythonDatas
 
     _SUM_STATEMENT = re.compile(r"^\s*([A-Za-z_][\w\.]*)\s*\+\s*(.+)$")
     _ASSIGN_STATEMENT = re.compile(r"^\s*(.+?)\s*=\s*(.+)$")
-    _DO_TO_STATEMENT = re.compile(r"^do\s+([A-Za-z_][\w\.]*)\s*=\s*(.+?)\s+to\s+(.+)$", re.IGNORECASE)
-    _ARRAY_DECLARATION = re.compile(
-        r"^array\s+([A-Za-z_][\w\.]*)\s*(\[[^\]]+\])?\s+(\$\s+)?(.+)$",
-        re.IGNORECASE,
-    )
     _SIMPLE_WHERE_COMPARISON = re.compile(
         r"^\s*([A-Za-z_][\w\.]*)\s*(>=|<=|!=|=|>|<)\s*(.+?)\s*$",
         re.IGNORECASE,
@@ -55,10 +50,6 @@ class PythonBackendExecutionService(_PythonStatementExecutionMixin, _PythonDatas
         self._runtime = runtime
         self._evaluator = evaluator
         self._io_service = io_service
-        self._if_then_do_condition_cache: dict[str, str | None] = {}
-        self._if_then_action_cache: dict[tuple[str, str], tuple[str, str] | None] = {}
-        self._subset_if_condition_cache: dict[tuple[str, str], str | None] = {}
-        self._if_like_statement_cache: dict[tuple[str, str], tuple[str, Mapping[str, Any]] | None] = {}
         self._input_preparation = _PythonInputPreparationService(self)
         self._program_execution = _PythonProgramExecutionService(self)
 
@@ -110,6 +101,7 @@ class PythonBackendExecutionService(_PythonStatementExecutionMixin, _PythonDatas
     ) -> tuple[dict[str, DataSetRef], list[Diagnostic]]:
         diagnostics: list[Diagnostic] = []
         if_chain = self._extract_if_chain(ast_statements)
+        where_statement = next((statement for statement in ast_statements if statement.kind == "WHERE"), None)
         subset_if_conditions = self._extract_subset_if_conditions(ast_statements)
         has_if_explicit_output = False
         if if_chain is not None:
@@ -174,7 +166,13 @@ class PythonBackendExecutionService(_PythonStatementExecutionMixin, _PythonDatas
                 if where_expression and not self._runtime.passes_where(row, context, where_expression):
                     continue
             except self._runtime.RuntimeExecutionError as error:
-                diagnostics.append(error.diagnostic)
+                diagnostics.append(
+                    self._attach_execute_context(
+                        error.diagnostic,
+                        statement=where_statement,
+                        expression_text=self._extract_statement_expression(where_statement, keyword="where"),
+                    )
+                )
                 return {}, diagnostics
 
             working_row = dict(row)
@@ -201,7 +199,13 @@ class PythonBackendExecutionService(_PythonStatementExecutionMixin, _PythonDatas
                     marked_for_stop = bool(evaluated.pop("__stop__", False))
                     working_row = evaluated
             except self._runtime.RuntimeExecutionError as error:
-                diagnostics.append(error.diagnostic)
+                diagnostics.append(
+                    self._attach_execute_context(
+                        error.diagnostic,
+                        statement=where_statement,
+                        expression_text=self._extract_statement_expression(where_statement, keyword="where"),
+                    )
+                )
                 return {}, diagnostics
 
             if has_unconditional_delete or marked_for_delete:
@@ -363,6 +367,7 @@ class PythonBackendExecutionService(_PythonStatementExecutionMixin, _PythonDatas
         diagnostics: list[Diagnostic] = []
         context = self._runtime.create_context()
         routed = self._runtime.create_output_buffers(resolved_output_targets)
+        where_statement = next((statement for statement in ast_statements if statement.kind == "WHERE"), None)
         executable = self._extract_executable_statements(ast_statements)
         has_explicit_output_statement = any(statement.kind == "OUTPUT" for statement in executable)
         if not has_explicit_output_statement:
@@ -390,13 +395,19 @@ class PythonBackendExecutionService(_PythonStatementExecutionMixin, _PythonDatas
                 if where_expression and not self._runtime.passes_where(row, context, where_expression):
                     continue
             except self._runtime.RuntimeExecutionError as error:
-                diagnostics.append(error.diagnostic)
+                diagnostics.append(
+                    self._attach_execute_context(
+                        error.diagnostic,
+                        statement=where_statement,
+                        expression_text=self._extract_statement_expression(where_statement, keyword="where"),
+                    )
+                )
                 return {}, diagnostics
 
             working_row = dict(row) if should_copy_source_row else row
             for name, value in retain_state.items():
-                if name not in working_row:
-                    working_row[name] = value
+                if not self._runtime.has_row_name(working_row, name):
+                    self._runtime.set_row_value(working_row, context, name, value)
             emitted_rows: list[tuple[str | None, dict[str, Any]]] = []
             array_defs: dict[str, tuple[str, ...]] = {}
             row_deleted, stop_execution, execution_error = self._run_statement_block(
@@ -414,11 +425,11 @@ class PythonBackendExecutionService(_PythonStatementExecutionMixin, _PythonDatas
                 return {}, diagnostics
 
             for name in retain_state.keys():
-                if name in working_row:
-                    retain_state[name] = working_row[name]
+                if self._runtime.has_row_name(working_row, name):
+                    retain_state[name] = self._runtime.get_row_value(working_row, context, name)
 
             if not row_deleted and not emitted_rows and not has_explicit_output_statement:
-                emitted_rows.append((None, dict(working_row)))
+                emitted_rows.append((None, self._runtime.export_row(working_row, context)))
 
             for selected_output_target, emitted in emitted_rows:
                 routed_row = self._runtime.apply_drop_keep(emitted, drop_vars=drop_vars, keep_vars=keep_vars)
@@ -555,6 +566,7 @@ class PythonBackendExecutionService(_PythonStatementExecutionMixin, _PythonDatas
 
         excluded_output_variables: set[str] = set()
         where_expression = self._extract_expression(ast_statements, "WHERE")
+        where_statement = next((statement for statement in ast_statements if statement.kind == "WHERE"), None)
         drop_vars = self._extract_variable_list(ast_statements, "DROP")
         keep_vars = self._extract_variable_list(ast_statements, "KEEP")
         output_dataset_options = self._collect_output_dataset_options(
@@ -610,7 +622,13 @@ class PythonBackendExecutionService(_PythonStatementExecutionMixin, _PythonDatas
                 if where_expression and not self._runtime.passes_where(option_row, context, where_expression):
                     continue
             except self._runtime.RuntimeExecutionError as error:
-                diagnostics.append(error.diagnostic)
+                diagnostics.append(
+                    self._attach_execute_context(
+                        error.diagnostic,
+                        statement=where_statement,
+                        expression_text=self._extract_statement_expression(where_statement, keyword="where"),
+                    )
+                )
                 return {}, diagnostics
 
             working_row = option_row
@@ -637,7 +655,12 @@ class PythonBackendExecutionService(_PythonStatementExecutionMixin, _PythonDatas
                     marked_for_stop = bool(evaluated.pop("__stop__", False))
                     working_row = evaluated
             except self._runtime.RuntimeExecutionError as error:
-                diagnostics.append(error.diagnostic)
+                diagnostics.append(
+                    self._attach_execute_context(
+                        error.diagnostic,
+                        statement=self._first_if_chain_statement(ast_statements),
+                    )
+                )
                 return {}, diagnostics
 
             if has_unconditional_delete or marked_for_delete:
@@ -741,7 +764,7 @@ class PythonBackendExecutionService(_PythonStatementExecutionMixin, _PythonDatas
             for statement in ast_statements
         )
         has_advanced_runtime = has_advanced_runtime or any(
-            statement.kind == "IF" and self._parse_if_then_do_condition(statement.text) is not None
+            statement.kind == "IF" and self._parse_if_then_do_condition(statement) is not None
             for statement in ast_statements
         )
 
@@ -1048,10 +1071,6 @@ class PythonBackendExecutionService(_PythonStatementExecutionMixin, _PythonDatas
                 and getattr(if_spec, "condition", "")
             ):
                 conditions.append(str(if_spec.condition))
-                continue
-            parsed = self._parse_subset_if_condition(statement.text, keyword="if")
-            if parsed is not None:
-                conditions.append(parsed)
         return tuple(conditions)
 
     def _parse_if_like_statement_from_ast(
@@ -1060,39 +1079,13 @@ class PythonBackendExecutionService(_PythonStatementExecutionMixin, _PythonDatas
         keyword: str,
     ) -> tuple[str, Mapping[str, Any]] | None:
         if_spec = getattr(statement, "if_spec", None)
-        if if_spec is not None:
-            condition = getattr(if_spec, "condition", "")
-            action = getattr(if_spec, "then_action", None)
-            if isinstance(condition, str) and condition and isinstance(action, str) and action:
-                return self._parse_if_condition_and_action(condition, action)
-        return self._parse_if_like_statement(statement.text, keyword=keyword)
-
-    def _parse_if_like_statement(
-        self,
-        text: str,
-        keyword: str,
-    ) -> tuple[str, Mapping[str, Any]] | None:
-        cache_key = (keyword, text)
-        if cache_key in self._if_like_statement_cache:
-            return self._if_like_statement_cache[cache_key]
-
-        normalized = text.lower()
-        prefix = f"{keyword} "
-        if not normalized.startswith(prefix):
-            self._if_like_statement_cache[cache_key] = None
+        if if_spec is None:
             return None
-
-        body = text[len(prefix):]
-        then_index = body.lower().find(" then ")
-        if then_index < 0:
-            self._if_like_statement_cache[cache_key] = None
+        condition = getattr(if_spec, "condition", "")
+        action = getattr(if_spec, "then_action", None)
+        if not isinstance(condition, str) or not condition or not isinstance(action, str) or not action:
             return None
-
-        raw_expression = body[:then_index].strip()
-        action = body[then_index + len(" then ") :].strip()
-        parsed = self._parse_if_condition_and_action(raw_expression, action)
-        self._if_like_statement_cache[cache_key] = parsed
-        return parsed
+        return self._parse_if_condition_and_action(condition, action)
 
     def _parse_if_condition_and_action(
         self,
@@ -1161,6 +1154,23 @@ class PythonBackendExecutionService(_PythonStatementExecutionMixin, _PythonDatas
         keyword = kind.lower()
         expression = statement.text[len(keyword):].strip()
         return self._normalize_expression(expression)
+
+    @staticmethod
+    def _extract_statement_expression(statement: Any | None, *, keyword: str) -> str | None:
+        if statement is None:
+            return None
+        statement_text = getattr(statement, "text", None)
+        if not isinstance(statement_text, str):
+            return None
+        lowered = statement_text.lower().strip()
+        prefix = f"{keyword} "
+        if not lowered.startswith(prefix):
+            return None
+        return statement_text.strip()[len(prefix):].strip() or None
+
+    @staticmethod
+    def _first_if_chain_statement(ast_statements: Sequence[Any]) -> Any | None:
+        return next((statement for statement in ast_statements if statement.kind in {"IF", "ELSE IF", "ELSE"}), None)
 
     def _extract_variable_list(self, ast_statements: Sequence[Any], kind: str) -> tuple[str, ...]:
         statement = next((item for item in ast_statements if item.kind == kind), None)

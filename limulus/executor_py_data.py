@@ -3,10 +3,36 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from ._naming import _column_key
 from .models import DataSetRef, Diagnostic
 
 
 class _PythonDatasetExecutionMixin:
+    @staticmethod
+    def _resolve_row_key(row: Mapping[str, Any], name: str) -> str | None:
+        if name in row:
+            return name
+
+        normalized = _column_key(name)
+        for candidate in row.keys():
+            if _column_key(candidate) == normalized:
+                return candidate
+        return None
+
+    def _resolve_row_value(self, row: Mapping[str, Any], name: str) -> Any:
+        resolved = self._resolve_row_key(row, name)
+        if resolved is None:
+            return None
+        return row.get(resolved)
+
+    @staticmethod
+    def _build_case_insensitive_scope(row: Mapping[str, Any]) -> dict[str, Any]:
+        scope = dict(row)
+        for column_name, value in row.items():
+            scope.setdefault(_column_key(column_name), value)
+            scope.setdefault(column_name.lower(), value)
+        return scope
+
     def _build_merge_rows(
         self,
         source_refs: Sequence[Any],
@@ -16,6 +42,8 @@ class _PythonDatasetExecutionMixin:
     ) -> tuple[list[tuple[str, dict[str, Any], str | None]], Diagnostic | None]:
         loaded_sources: list[tuple[str, str | None, list[dict[str, Any]]]] = []
         non_key_columns_by_source: list[set[str]] = []
+        normalized_by_keys = {_column_key(key) for key in by_keys}
+        canonical_by_names: dict[str, str] = {}
 
         for source_ref in source_refs:
             input_name = source_ref.name
@@ -54,7 +82,8 @@ class _PythonDatasetExecutionMixin:
 
             for row in option_rows:
                 for by_key in by_keys:
-                    if by_key not in row:
+                    resolved_by_key = self._resolve_row_key(row, by_key)
+                    if resolved_by_key is None:
                         return [], Diagnostic(
                             code="RUNTIME_BY_PRECONDITION_FAILED",
                             severity="error",
@@ -62,12 +91,13 @@ class _PythonDatasetExecutionMixin:
                                 f"BY key '{by_key}' is missing in source '{input_name}'."
                             ),
                         )
+                    canonical_by_names.setdefault(_column_key(by_key), resolved_by_key)
 
             non_key_columns = {
-                column_name
+                _column_key(column_name)
                 for row in option_rows
                 for column_name in row.keys()
-                if column_name not in by_keys
+                if _column_key(column_name) not in normalized_by_keys
             }
             non_key_columns_by_source.append(non_key_columns)
             loaded_sources.append((input_name, source_ref.options.in_var, option_rows))
@@ -114,11 +144,13 @@ class _PythonDatasetExecutionMixin:
         for _, _, rows in loaded_sources:
             grouped: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
             for row in rows:
-                key = tuple(row[key_name] for key_name in by_keys)
+                key = tuple(self._resolve_row_value(row, key_name) for key_name in by_keys)
                 grouped.setdefault(key, []).append(row)
                 if key not in merge_key_order:
                     merge_key_order.append(key)
             grouped_sources.append(grouped)
+
+        output_by_keys = tuple(canonical_by_names.get(_column_key(key), key) for key in by_keys)
 
         merged_rows: list[dict[str, Any]] = []
         merged_sources: list[str] = []
@@ -144,7 +176,15 @@ class _PythonDatasetExecutionMixin:
                         contributing_sources.append(source_name)
                         contributing_in_vars.append(in_var)
 
-                for by_index, by_key in enumerate(by_keys):
+                for by_index, by_key in enumerate(output_by_keys):
+                    normalized_by_key = _column_key(by_keys[by_index])
+                    duplicate_by_names = [
+                        name
+                        for name in tuple(merged_row)
+                        if _column_key(name) == normalized_by_key and name != by_key
+                    ]
+                    for duplicate_name in duplicate_by_names:
+                        merged_row.pop(duplicate_name, None)
                     merged_row[by_key] = key[by_index]
 
                 merged_rows.append(merged_row)
@@ -170,7 +210,7 @@ class _PythonDatasetExecutionMixin:
             return rows, None
 
         for by_key in by_keys:
-            if any(by_key not in row for row in rows):
+            if any(self._resolve_row_key(row, by_key) is None for row in rows):
                 return [], Diagnostic(
                     code="RUNTIME_BY_PRECONDITION_FAILED",
                     severity="error",
@@ -179,9 +219,9 @@ class _PythonDatasetExecutionMixin:
 
         for by_key in by_keys:
             for index, row in enumerate(rows):
-                previous_value = rows[index - 1].get(by_key) if index > 0 else object()
-                next_value = rows[index + 1].get(by_key) if index < len(rows) - 1 else object()
-                current_value = row.get(by_key)
+                previous_value = self._resolve_row_value(rows[index - 1], by_key) if index > 0 else object()
+                next_value = self._resolve_row_value(rows[index + 1], by_key) if index < len(rows) - 1 else object()
+                current_value = self._resolve_row_value(row, by_key)
                 row[f"FIRST.{by_key}"] = 1 if current_value != previous_value else 0
                 row[f"LAST.{by_key}"] = 1 if current_value != next_value else 0
                 row[f"first.{by_key}"] = row[f"FIRST.{by_key}"]
@@ -207,7 +247,7 @@ class _PythonDatasetExecutionMixin:
 
         processed: list[dict[str, Any]] = []
 
-        if option_spec.rename_map and len(set(option_spec.rename_map.values())) != len(option_spec.rename_map):
+        if option_spec.rename_map and len({_column_key(value) for value in option_spec.rename_map.values()}) != len(option_spec.rename_map):
             return [], Diagnostic(
                 code="RUNTIME_DATASET_OPTION_INVALID",
                 severity="error",
@@ -218,16 +258,24 @@ class _PythonDatasetExecutionMixin:
             working = dict(row)
 
             if option_spec.keep_vars:
-                keep_set = set(option_spec.keep_vars)
-                working = {name: value for name, value in working.items() if name in keep_set}
+                keep_set = {_column_key(name) for name in option_spec.keep_vars}
+                working = {
+                    name: value
+                    for name, value in working.items()
+                    if _column_key(name) in keep_set
+                }
 
             if option_spec.drop_vars:
-                drop_set = set(option_spec.drop_vars)
-                working = {name: value for name, value in working.items() if name not in drop_set}
+                drop_set = {_column_key(name) for name in option_spec.drop_vars}
+                working = {
+                    name: value
+                    for name, value in working.items()
+                    if _column_key(name) not in drop_set
+                }
 
             if option_spec.where_expr:
                 try:
-                    passes = bool(eval(option_spec.where_expr, {"__builtins__": {}}, dict(working)))
+                    passes = bool(eval(option_spec.where_expr, {"__builtins__": {}}, self._build_case_insensitive_scope(working)))
                 except Exception as error:
                     return [], Diagnostic(
                         code="RUNTIME_DATASET_OPTION_INVALID",
@@ -240,11 +288,10 @@ class _PythonDatasetExecutionMixin:
                     continue
 
             if option_spec.rename_map:
-                renamed_row: dict[str, Any] = {}
-                for key, value in working.items():
-                    renamed_row[option_spec.rename_map.get(key, key)] = value
-                for old_name in option_spec.rename_map:
-                    if old_name not in working:
+                resolved_rename_map: dict[str, str] = {}
+                for old_name, new_name in option_spec.rename_map.items():
+                    resolved_old_name = self._resolve_row_key(working, old_name)
+                    if resolved_old_name is None:
                         return [], Diagnostic(
                             code="RUNTIME_DATASET_OPTION_INVALID",
                             severity="error",
@@ -253,6 +300,10 @@ class _PythonDatasetExecutionMixin:
                                 f"for source '{source_name}'."
                             ),
                         )
+                    resolved_rename_map[resolved_old_name] = new_name
+                renamed_row: dict[str, Any] = {}
+                for key, value in working.items():
+                    renamed_row[resolved_rename_map.get(key, key)] = value
                 working = renamed_row
 
             processed.append(working)
@@ -294,7 +345,7 @@ class _PythonDatasetExecutionMixin:
         ):
             return row if isinstance(row, dict) else dict(row), None
 
-        if option_spec.rename_map and len(set(option_spec.rename_map.values())) != len(option_spec.rename_map):
+        if option_spec.rename_map and len({_column_key(value) for value in option_spec.rename_map.values()}) != len(option_spec.rename_map):
             return None, Diagnostic(
                 code="RUNTIME_DATASET_OPTION_INVALID",
                 severity="error",
@@ -304,16 +355,24 @@ class _PythonDatasetExecutionMixin:
         working = dict(row)
 
         if option_spec.keep_vars:
-            keep_set = set(option_spec.keep_vars)
-            working = {name: value for name, value in working.items() if name in keep_set}
+            keep_set = {_column_key(name) for name in option_spec.keep_vars}
+            working = {
+                name: value
+                for name, value in working.items()
+                if _column_key(name) in keep_set
+            }
 
         if option_spec.drop_vars:
-            drop_set = set(option_spec.drop_vars)
-            working = {name: value for name, value in working.items() if name not in drop_set}
+            drop_set = {_column_key(name) for name in option_spec.drop_vars}
+            working = {
+                name: value
+                for name, value in working.items()
+                if _column_key(name) not in drop_set
+            }
 
         if option_spec.where_expr:
             try:
-                passes = bool(eval(option_spec.where_expr, {"__builtins__": {}}, dict(working)))
+                passes = bool(eval(option_spec.where_expr, {"__builtins__": {}}, self._build_case_insensitive_scope(working)))
             except Exception as error:
                 return None, Diagnostic(
                     code="RUNTIME_DATASET_OPTION_INVALID",
@@ -326,11 +385,10 @@ class _PythonDatasetExecutionMixin:
                 return None, None
 
         if option_spec.rename_map:
-            renamed_row: dict[str, Any] = {}
-            for key, value in working.items():
-                renamed_row[option_spec.rename_map.get(key, key)] = value
-            for old_name in option_spec.rename_map:
-                if old_name not in working:
+            resolved_rename_map: dict[str, str] = {}
+            for old_name, new_name in option_spec.rename_map.items():
+                resolved_old_name = self._resolve_row_key(working, old_name)
+                if resolved_old_name is None:
                     return None, Diagnostic(
                         code="RUNTIME_DATASET_OPTION_INVALID",
                         severity="error",
@@ -339,6 +397,10 @@ class _PythonDatasetExecutionMixin:
                             f"for source '{source_name}'."
                         ),
                     )
+                resolved_rename_map[resolved_old_name] = new_name
+            renamed_row: dict[str, Any] = {}
+            for key, value in working.items():
+                renamed_row[resolved_rename_map.get(key, key)] = value
             working = renamed_row
 
         return working, None

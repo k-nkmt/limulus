@@ -1,6 +1,6 @@
 import unittest
 
-from limulus.parser import ParserExecutionContext, ParserService, RustNativeParserBackend
+from limulus.parser import ParserExecutionContext, ParserService, RustNativeParserBackend, SplitStageParserService
 
 
 PARSER_SCENARIOS = {
@@ -40,6 +40,17 @@ PARSER_SCENARIOS = {
     "merge_end_statement_option": {
         "overview": "Parses END= as a MERGE statement option",
         "dsl": "data out; merge a b end=eof; by id; run;",
+    },
+    "merge_options_parser_based_interleaved": {
+        "overview": "Parses interleaved dataset options and MERGE statement options via parser structure",
+        "dsl": (
+            "data out; "
+            "merge in_a(keep=id amount drop=tmp where=(amount > 0) rename=(amount=amt)) "
+            "in_b(in=in_right keep=id) "
+            "end=eof; "
+            "by id; "
+            "run;"
+        ),
     },
     "invalid_option_scope": {
         "overview": "Returns PARSE_SET_OPTION_SCOPE_ERROR when option scope is invalid",
@@ -138,9 +149,17 @@ PARSER_SCENARIOS = {
         "overview": "Parses structured IF metadata for subset IF and IF THEN action",
         "dsl": "data out; set in; if amount > 0; if amount = 0 then output out; run;",
     },
+    "if_structured_keyword_ops": {
+        "overview": "Parses IF metadata and normalizes keyword operators through the structured parser",
+        "dsl": "data out; set in; if amount eq 0 and not flag; if score ^= 1 or amount le 10 then output out; run;",
+    },
     "do_array_structured_spec": {
         "overview": "Parses structured DO/ARRAY metadata",
         "dsl": "data out; set in; array vars[*] a b c; do i = 1 to 3; output out; end; run;",
+    },
+    "do_array_structured_spec_numeric_and_char": {
+        "overview": "Parses numeric ARRAY size, character marker, and expression DO bounds",
+        "dsl": "data out; set in; array names 3 $ first second third; do idx = start + 1 to finish - 1; end; run;",
     },
 }
 
@@ -194,6 +213,25 @@ class ParserServiceTests(unittest.TestCase):
             or "near line" in result.diagnostics[0].message
         )
 
+    def test_invalid_syntax_diagnostic_includes_span_label_and_source(self) -> None:
+        scenario = PARSER_SCENARIOS["invalid_syntax"]
+        dsl_text = scenario["dsl"]
+
+        result = self.parser.parse(dsl_text)
+
+        self.assertTrue(result.has_errors)
+        diagnostic = result.diagnostics[0]
+        self.assertIsNotNone(diagnostic.span)
+        assert diagnostic.span is not None
+        self.assertEqual(diagnostic.span.line, 1)
+        self.assertEqual(diagnostic.span.column, 11)
+        self.assertEqual(diagnostic.span.start, 10)
+        self.assertGreaterEqual(diagnostic.span.end, diagnostic.span.start)
+        self.assertEqual(diagnostic.source_text, dsl_text)
+        self.assertEqual(len(diagnostic.labels), 1)
+        self.assertEqual(diagnostic.labels[0].kind, "primary")
+        self.assertEqual(diagnostic.labels[0].span, diagnostic.span)
+
     def test_parses_set_dataset_ref_options_and_set_statement_options_with_scope_boundary(self) -> None:
         scenario = PARSER_SCENARIOS["set_options_and_statement_options"]
         dsl_text = scenario["dsl"]
@@ -245,6 +283,19 @@ class ParserServiceTests(unittest.TestCase):
         self.assertTrue(result_merge_inds.has_errors)
         self.assertEqual(result_merge_inds.diagnostics[0].code, "PARSE_SET_OPTION_SCOPE_ERROR")
 
+    def test_option_scope_diagnostic_includes_statement_span(self) -> None:
+        scenario = PARSER_SCENARIOS["invalid_option_scope"]
+
+        result = self.parser.parse(scenario["dsl_indsname_dataset_scope"])
+
+        self.assertTrue(result.has_errors)
+        diagnostic = result.diagnostics[0]
+        self.assertEqual(diagnostic.code, "PARSE_SET_OPTION_SCOPE_ERROR")
+        self.assertIsNotNone(diagnostic.span)
+        assert diagnostic.span is not None
+        self.assertEqual(diagnostic.span.line, 1)
+        self.assertEqual(diagnostic.source_text, scenario["dsl_indsname_dataset_scope"])
+
     def test_parses_merge_end_statement_option(self) -> None:
         scenario = PARSER_SCENARIOS["merge_end_statement_option"]
 
@@ -254,6 +305,58 @@ class ParserServiceTests(unittest.TestCase):
         merge_statement = next(statement for statement in result.ast.statements if statement.kind == "MERGE")
         self.assertEqual(tuple(ref.name for ref in merge_statement.dataset_refs), ("a", "b"))
         self.assertEqual(merge_statement.statement_options.end_var, "eof")
+
+    def test_parses_merge_dataset_options_with_interleaved_statement_options(self) -> None:
+        scenario = PARSER_SCENARIOS["merge_options_parser_based_interleaved"]
+
+        result = self.parser.parse(scenario["dsl"])
+
+        self.assertFalse(result.has_errors)
+        merge_statement = next(statement for statement in result.ast.statements if statement.kind == "MERGE")
+        self.assertEqual(merge_statement.statement_options.end_var, "eof")
+
+        first_options = merge_statement.dataset_refs[0].options
+        self.assertEqual(first_options.keep_vars, ("id", "amount"))
+        self.assertEqual(first_options.drop_vars, ("tmp",))
+        self.assertEqual(first_options.rename_map, {"amount": "amt"})
+        self.assertEqual(first_options.where_expr, "amount > 0")
+
+        second_options = merge_statement.dataset_refs[1].options
+        self.assertEqual(second_options.in_var, "in_right")
+        self.assertEqual(second_options.keep_vars, ("id",))
+
+
+class SplitStageParserServiceTests(unittest.TestCase):
+    def test_extracts_proc_and_macro_skip_regions_via_parser(self) -> None:
+        parser = SplitStageParserService()
+        dsl_text = """
+        %let cutoff = 10;
+        %macro noop();
+        data hidden;
+        set inp;
+        run;
+        %mend noop;
+        proc sort data=inp out=sorted;
+        by id;
+        run;
+        data out;
+        set inp;
+        value = "proc sort data=inp; quit; %macro noop();";
+        run;
+        """
+
+        regions = parser.extract_statement_regions(dsl_text)
+
+        self.assertIsNotNone(regions)
+        assert regions is not None
+        kinds = [region.kind for region in regions]
+        self.assertIn("SKIP", kinds)
+        self.assertEqual(kinds[-4:], ["DATA", "OTHER", "OTHER", "RUN"])
+
+        skipped_texts = [dsl_text[region.start:region.end].strip() for region in regions if region.kind == "SKIP"]
+        self.assertTrue(any(text.lower().startswith("%let") for text in skipped_texts))
+        self.assertTrue(any(text.lower().startswith("%macro") for text in skipped_texts))
+        self.assertTrue(any(text.lower().startswith("proc sort") for text in skipped_texts))
 
     def test_parses_set_multiple_inputs_and_delete_statement(self) -> None:
         scenario = PARSER_SCENARIOS["set_multiple_inputs_delete"]
@@ -446,6 +549,22 @@ class ParserServiceTests(unittest.TestCase):
         self.assertEqual(then_if.if_spec.condition, "amount == 0")
         self.assertEqual(then_if.if_spec.then_action, "output out")
 
+    def test_parses_if_keyword_operator_normalization_via_structured_parser(self) -> None:
+        scenario = PARSER_SCENARIOS["if_structured_keyword_ops"]
+        result = self.parser.parse(scenario["dsl"])
+
+        self.assertFalse(result.has_errors)
+        if_statements = [statement for statement in result.ast.statements if statement.kind == "IF"]
+        self.assertEqual(len(if_statements), 2)
+
+        subset_if = if_statements[0]
+        self.assertEqual(subset_if.if_spec.condition, "amount == 0 and not flag")
+        self.assertTrue(subset_if.if_spec.is_subset)
+
+        then_if = if_statements[1]
+        self.assertEqual(then_if.if_spec.condition, "score != 1 or amount <= 10")
+        self.assertEqual(then_if.if_spec.then_action, "output out")
+
     def test_parses_do_and_array_structured_metadata(self) -> None:
         scenario = PARSER_SCENARIOS["do_array_structured_spec"]
         result = self.parser.parse(scenario["dsl"])
@@ -463,6 +582,26 @@ class ParserServiceTests(unittest.TestCase):
         self.assertEqual(do_statement.do_spec.loop_var, "i")
         self.assertEqual(do_statement.do_spec.start_expr, "1")
         self.assertEqual(do_statement.do_spec.end_expr, "3")
+
+    def test_parses_numeric_character_array_and_expression_do_bounds(self) -> None:
+        scenario = PARSER_SCENARIOS["do_array_structured_spec_numeric_and_char"]
+        result = self.parser.parse(scenario["dsl"])
+
+        self.assertFalse(result.has_errors)
+        array_statement = next(statement for statement in result.ast.statements if statement.kind == "ARRAY")
+        do_statement = next(statement for statement in result.ast.statements if statement.kind == "DO")
+
+        self.assertIsNotNone(array_statement.array_spec)
+        self.assertEqual(array_statement.array_spec.array_name, "names")
+        self.assertEqual(array_statement.array_spec.variables, ("first", "second", "third"))
+        self.assertEqual(array_statement.array_spec.declared_size, 3)
+        self.assertFalse(array_statement.array_spec.wildcard_size)
+        self.assertTrue(array_statement.array_spec.character_array)
+
+        self.assertIsNotNone(do_statement.do_spec)
+        self.assertEqual(do_statement.do_spec.loop_var, "idx")
+        self.assertEqual(do_statement.do_spec.start_expr, "start + 1")
+        self.assertEqual(do_statement.do_spec.end_expr, "finish - 1")
 
 
 class ParserNativeIntegrationTests(unittest.TestCase):

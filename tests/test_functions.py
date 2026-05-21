@@ -1,5 +1,6 @@
 import math
 import unittest
+import datetime as dt
 
 import pyarrow as pa
 import pytest
@@ -540,6 +541,73 @@ class TestRegexFunctions:
 
         assert result.success is True
         assert list(s.to_pandas("out")["y"]) == case["expected"]
+
+
+class TestFormatFunctionsRust:
+    def test_put_input_and_hour_are_supported_on_rust_backend(self) -> None:
+        session = Session(runtime_backend="rust", parser_backend="python")
+        session.load(
+            "inp",
+            pa.table(
+                {
+                    "id": [7],
+                    "amount": [12345.6],
+                    "best_text": ["12345.6"],
+                    "date_text": ["2024-02-03"],
+                    "timestamp_text": ["2024-02-03T16:24:43"],
+                    "clock_text": ["11:30"],
+                }
+            ),
+        )
+
+        result = session.submit(
+            """
+            data out;
+            set inp;
+            code = put(id, z5.);
+            fixed_text = put(amount, 8.1.);
+            rounded_text = put(amount, 8.);
+            comma_text = put(amount, comma8.1.);
+            zero_scaled = put(amount, z8.1.);
+            best_rendered = put(amount, best.);
+            best_value = input(best_text, best.);
+            visit_date = input(date_text, yymmdd10.);
+            visit_iso = put(visit_date, e8601da.);
+            timestamp_value = input(timestamp_text, e8601dt.);
+            timestamp_iso = put(timestamp_value, e8601dt.);
+            clock_value = input(clock_text, time.);
+            clock_iso = put(clock_value, time.);
+            clock_hour = hour(clock_text);
+            run;
+            """
+        )
+
+        assert result.success is True
+        assert session._executor.last_runtime_backend == "rust"
+        assert session["out"].to_pylist() == [
+            {
+                "id": 7,
+                "amount": 12345.6,
+                "best_text": "12345.6",
+                "date_text": "2024-02-03",
+                "timestamp_text": "2024-02-03T16:24:43",
+                "clock_text": "11:30",
+                "code": "00007",
+                "fixed_text": "12345.6",
+                "rounded_text": "12346",
+                "comma_text": "12,345.6",
+                "zero_scaled": "012345.6",
+                "best_rendered": "12345.6",
+                "best_value": 12345.6,
+                "visit_date": dt.date(2024, 2, 3),
+                "visit_iso": "2024-02-03",
+                "timestamp_value": dt.datetime(2024, 2, 3, 16, 24, 43),
+                "timestamp_iso": "2024-02-03T16:24:43",
+                "clock_value": dt.time(11, 30),
+                "clock_iso": "11:30:00",
+                "clock_hour": 11.5,
+            }
+        ]
 
 
 class TestFunctionParity:

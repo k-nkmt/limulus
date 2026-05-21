@@ -1,0 +1,9 @@
+start: rename_pair+
+
+rename_pair: NAME EQUALS NAME
+
+NAME: /[A-Za-z_][\w\.]*/
+EQUALS: "="
+
+%import common.WS_INLINE
+%ignore WS_INLINE

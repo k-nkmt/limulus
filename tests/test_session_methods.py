@@ -1,8 +1,17 @@
+import datetime as dt
+
 import pyarrow as pa
 import pytest
+import re
+from unittest.mock import patch
 
+from limulus.arrow_bridge import restore_arrow_schema_from_sources
 from limulus import Session
 from limulus.models import ExecuteResponse
+
+
+def _strip_ansi(text: str) -> str:
+    return re.sub(r"\x1b\[[0-9;]*m", "", text)
 
 
 SESSION_METHOD_SCENARIOS = {
@@ -335,6 +344,29 @@ def test_session_step_style_methods() -> None:
     assert session["out"].to_pylist() == scenario["expected_output"]
 
 
+def test_session_step_style_methods_resolve_columns_case_insensitively() -> None:
+    session = Session()
+    session.load(
+        "src",
+        pa.table(
+            {
+                "Id": [1, 2],
+                "Amount": [10, -1],
+                "Name": ["Alice", "Bob"],
+            }
+        ),
+    )
+
+    session.where("src", "amount > 0", out="flt")
+    session.keep("flt", ["ID", "amount", "name"], out="kept")
+    session.drop("kept", ["NAME"], out="trimmed")
+    session.rename("trimmed", {"amount": "amt"}, out="renamed")
+    session.cast("renamed", {"AMT": "float32"}, out="out")
+
+    assert session["out"].to_pylist() == [{"Id": 1, "amt": 10.0}]
+    assert session.to_arrow("out").column("amt").type == pa.float32()
+
+
 def test_session_set_option_get_option_and_submit_propagation() -> None:
     scenario = SESSION_METHOD_SCENARIOS["submit_option_propagation"]
     session = Session()
@@ -391,6 +423,21 @@ def test_session_cast_alias_uses_out_parameter() -> None:
     assert session.to_arrow("typed").column("amount").type == scenario["expected_type"]
 
 
+def test_session_astype_alias_adds_new_typed_column() -> None:
+    session = Session()
+    session.load("src", pa.table({"id": [1, 2], "amount": [1.25, 2.5]}))
+
+    session.astype("src", {"amount": "float32"}, alias="amount_f32", out="typed")
+
+    typed = session.to_arrow("typed")
+    assert typed.column("amount").type == pa.float64()
+    assert typed.column("amount_f32").type == pa.float32()
+    assert typed.to_pylist() == [
+        {"id": 1, "amount": 1.25, "amount_f32": 1.25},
+        {"id": 2, "amount": 2.5, "amount_f32": 2.5},
+    ]
+
+
 def test_session_sql_returns_arrow_and_can_store_target_from_create_table() -> None:
     scenario = SESSION_METHOD_SCENARIOS["sql_query_and_store"]
     session = Session()
@@ -417,6 +464,277 @@ def test_session_sql_restores_arrow_metadata_after_polars_roundtrip() -> None:
     assert query_result.schema.field("amount").metadata[b"label"] == scenario["expected_amount_label"]
     assert session.to_arrow("out").schema.metadata[b"memlabel"] == scenario["expected_memlabel"]
     assert session.to_arrow("out").schema.field("id").metadata[b"label"] == scenario["expected_id_label"]
+
+
+def test_restore_arrow_schema_from_sources_matches_columns_case_insensitively() -> None:
+    source = pa.Table.from_pydict(
+        {"Amount": pa.array([10, 20], type=pa.int32())},
+        schema=pa.schema(
+            [pa.field("Amount", pa.int32(), metadata={b"label": b"Amount"})],
+            metadata={b"memlabel": b"Case Source"},
+        ),
+    )
+    target = pa.Table.from_pydict({"amount": pa.array([10, 20], type=pa.int64())})
+
+    restored = restore_arrow_schema_from_sources(target, source_tables=(source,))
+
+    assert restored.schema.metadata[b"memlabel"] == b"Case Source"
+    assert restored.schema.field("amount").metadata[b"label"] == b"Amount"
+
+
+def test_session_cast_keeps_requested_arrow_type_after_polars_roundtrip() -> None:
+    session = Session()
+    session.load(
+        "src",
+        pa.table({"Amount": pa.array([1.25, 2.5], type=pa.float64())}),
+    )
+
+    session.cast("src", {"amount": "float32"}, out="typed")
+
+    assert session.to_arrow("typed").column("Amount").type == pa.float32()
+
+
+def test_session_sort_assign_and_transpose_preserve_arrow_metadata_after_helper_pipeline() -> None:
+    schema = pa.schema(
+        [
+            pa.field("grp", pa.string(), metadata={b"label": b"Group"}),
+            pa.field("visit", pa.string(), metadata={b"label": b"Visit"}),
+            pa.field("score", pa.int64(), metadata={b"label": b"Score"}),
+        ],
+        metadata={b"memlabel": b"Visits"},
+    )
+    source = pa.Table.from_pydict(
+        {
+            "grp": ["a", "a", "b"],
+            "visit": ["v2", "v1", "v1"],
+            "score": [20, 10, 30],
+        },
+        schema=schema,
+    )
+    session = Session()
+    session.load("src", source)
+
+    session.sort("src", ["grp", "visit"], out="sorted", nodupkey=True)
+    session.assign("sorted", out="assigned", score_up="round(score, 1)")
+    session.transpose("assigned", by=["grp"], id="visit", var=["score"], out="wide")
+
+    sorted_table = session.to_arrow("sorted")
+    assigned_table = session.to_arrow("assigned")
+    wide_table = session.to_arrow("wide")
+
+    assert sorted_table.schema.metadata[b"memlabel"] == b"Visits"
+    assert sorted_table.schema.field("grp").metadata[b"label"] == b"Group"
+    assert sorted_table.schema.field("score").metadata[b"label"] == b"Score"
+    assert assigned_table.schema.metadata[b"memlabel"] == b"Visits"
+    assert assigned_table.schema.field("grp").metadata[b"label"] == b"Group"
+    assert assigned_table.schema.field("score").metadata[b"label"] == b"Score"
+    assert wide_table.schema.metadata[b"memlabel"] == b"Visits"
+    assert wide_table.schema.field("grp").metadata[b"label"] == b"Group"
+
+
+def test_session_load_normalizes_work_prefixed_dataset_names_case_insensitively() -> None:
+    session = Session()
+    session.load("WORK.MixedCase", pa.table({"id": [1, 2]}))
+
+    assert "mixedcase" in session.datasets
+    assert "WORK.MIXEDCASE" in session.datasets
+    assert session.to_arrow("mixedcase").to_pylist() == [{"id": 1}, {"id": 2}]
+    assert session.to_arrow("WORK.MIXEDCASE").to_pylist() == [{"id": 1}, {"id": 2}]
+
+
+def test_session_dictionary_tables_and_columns_reflect_arrow_schema_metadata() -> None:
+    schema = pa.schema(
+        [
+            pa.field("subject_id", pa.int64(), metadata={b"label": b"Subject ID"}),
+            pa.field("visit", pa.string(), metadata={b"label": b"Visit"}),
+        ],
+        metadata={b"memlabel": b"Clinical Visits"},
+    )
+    session = Session()
+    session.load(
+        "work.visits",
+        pa.Table.from_pydict(
+            {"subject_id": [1001, 1002], "visit": ["BASELINE", "WEEK4"]},
+            schema=schema,
+        ),
+    )
+
+    tables = session.dictionary.tables
+    columns = session.dictionary.columns
+
+    assert tables.to_pylist() == [
+        {
+            "LIBNAME": "WORK",
+            "MEMNAME": "VISITS",
+            "MEMTYPE": "DATA",
+            "MEMLABEL": "Clinical Visits",
+            "NOBS": 2,
+            "NVAR": 2,
+        }
+    ]
+    assert columns.column_names == [
+        "LIBNAME",
+        "MEMNAME",
+        "MEMTYPE",
+        "NAME",
+        "TYPE",
+        "VARNUM",
+        "LABEL",
+        "FORMAT",
+        "INFORMAT",
+    ]
+    assert columns.to_pylist() == [
+        {
+            "LIBNAME": "WORK",
+            "MEMNAME": "VISITS",
+            "MEMTYPE": "DATA",
+            "NAME": "subject_id",
+            "TYPE": "int64",
+            "VARNUM": 1,
+            "LABEL": "Subject ID",
+            "FORMAT": "",
+            "INFORMAT": "",
+        },
+        {
+            "LIBNAME": "WORK",
+            "MEMNAME": "VISITS",
+            "MEMTYPE": "DATA",
+            "NAME": "visit",
+            "TYPE": "string",
+            "VARNUM": 2,
+            "LABEL": "Visit",
+            "FORMAT": "",
+            "INFORMAT": "",
+        },
+    ]
+
+
+def test_session_dictionary_dataset_helpers_and_reserved_names() -> None:
+    session = Session()
+    session.load("src", pa.table({"id": [1], "name": ["Alice"]}))
+
+    assert session.dictionary("SRC").to_pylist() == [
+        {
+            "LIBNAME": "WORK",
+            "MEMNAME": "SRC",
+            "MEMTYPE": "DATA",
+            "NAME": "id",
+            "TYPE": "int64",
+            "VARNUM": 1,
+            "LABEL": "",
+            "FORMAT": "",
+            "INFORMAT": "",
+        },
+        {
+            "LIBNAME": "WORK",
+            "MEMNAME": "SRC",
+            "MEMTYPE": "DATA",
+            "NAME": "name",
+            "TYPE": "string",
+            "VARNUM": 2,
+            "LABEL": "",
+            "FORMAT": "",
+            "INFORMAT": "",
+        },
+    ]
+
+    with pytest.raises(ValueError, match="dictionary table"):
+        session.load("dictionary.tables", pa.table({"id": [1]}))
+
+
+def test_session_dictionary_reflects_submit_outputs_and_unload_removals() -> None:
+    session = Session(runtime_backend="python", parser_backend="python")
+    session.load("inp", pa.table({"id": [1, 2], "amount": [10, -1]}))
+
+    result = session.submit("data out; set inp; if amount > 0 then output out; run;")
+
+    assert result.success is True
+    assert session.dictionary.tables.to_pylist() == [
+        {"LIBNAME": "WORK", "MEMNAME": "INP", "MEMTYPE": "DATA", "MEMLABEL": "", "NOBS": 2, "NVAR": 2},
+        {"LIBNAME": "WORK", "MEMNAME": "OUT", "MEMTYPE": "DATA", "MEMLABEL": "", "NOBS": 1, "NVAR": 2},
+    ]
+
+    assert session.unload("out") is True
+    assert session.dictionary.tables.to_pylist() == [
+        {"LIBNAME": "WORK", "MEMNAME": "INP", "MEMTYPE": "DATA", "MEMLABEL": "", "NOBS": 2, "NVAR": 2},
+    ]
+
+
+def test_session_sql_can_query_dictionary_tables_and_drop_datasets() -> None:
+    session = Session()
+    session.load("src", pa.table({"id": [1, 2], "name": ["Alice", "Bob"]}))
+
+    dotted = session.sql(
+        "select MEMNAME, NAME, TYPE from dictionary.columns where MEMNAME = 'SRC' order by VARNUM"
+    )
+    aliased = session.sql(
+        "select MEMNAME, NAME, TYPE from dictionary_columns where MEMNAME = 'SRC' order by VARNUM"
+    )
+
+    assert dotted.to_pylist() == [
+        {"MEMNAME": "SRC", "NAME": "id", "TYPE": "int64"},
+        {"MEMNAME": "SRC", "NAME": "name", "TYPE": "string"},
+    ]
+    assert aliased.to_pylist() == dotted.to_pylist()
+
+    assert session.sql("drop table src") is None
+    assert "src" not in session.datasets
+
+
+def test_session_sql_rejects_reserved_dictionary_create_targets() -> None:
+    session = Session()
+    session.load("src", pa.table({"id": [1]}))
+
+    with pytest.raises(ValueError, match="dictionary table"):
+        session.sql("create table dictionary.columns as select id from src")
+
+
+def test_session_sql_drop_missing_table_raises_key_error() -> None:
+    session = Session()
+
+    with pytest.raises(KeyError, match="missing"):
+        session.sql("drop table missing")
+
+
+def test_session_sql_wraps_polars_execution_errors_with_rendered_message() -> None:
+    session = Session()
+    session.load("src", pa.table({"id": [1]}))
+
+    with pytest.raises(ValueError) as error_info:
+        session.sql("select * from missing")
+
+    rendered = _strip_ansi(str(error_info.value))
+    assert "session_sql_execution_error" in rendered.lower()
+    assert "select * from missing" in rendered.lower()
+    assert "sql execution failed" in rendered.lower()
+
+
+def test_session_filter_parse_error_uses_renderer_output() -> None:
+    session = Session()
+    session.load("src", pa.table({"amount": [10, 20]}))
+
+    with pytest.raises(ValueError) as error_info:
+        session.filter("src", "amount between 10 and 20", out="flt")
+
+    rendered = _strip_ansi(str(error_info.value))
+    assert "session_filter_parse_error" in rendered.lower()
+    assert "filter:src" in rendered
+    assert "amount between 10 and 20" in rendered
+    assert "simple comparison expression" in rendered.lower()
+
+
+def test_session_sql_classification_error_uses_renderer_output() -> None:
+    session = Session()
+    session.load("src", pa.table({"id": [1, 2]}))
+
+    with pytest.raises(ValueError) as error_info:
+        session.sql("create table out select id from src")
+
+    rendered = _strip_ansi(str(error_info.value))
+    assert "session_sql_classification_error" in rendered.lower()
+    assert "sql:1:1" in rendered.lower()
+    assert "create table out select id from src" in rendered.lower()
+    assert "create table name as <query>" in rendered.lower()
 
 
 def test_session_transpose_matches_proc_transpose_style_defaults() -> None:
@@ -447,6 +765,26 @@ def test_session_transpose_with_id_pivots_one_value_column_to_wide_output() -> N
     session.transpose("src", by=["grp"], id="visit", var=["score"], out="out")
 
     assert session["out"].to_pylist() == scenario["expected_output"]
+
+
+def test_session_transpose_preserves_value_column_arrow_type_for_wide_output() -> None:
+    session = Session()
+    session.load(
+        "src",
+        pa.table(
+            {
+                "grp": pa.array(["a", "a", "b"]),
+                "visit": pa.array(["v1", "v2", "v1"]),
+                "score": pa.array([10, 20, 30], type=pa.int32()),
+            }
+        ),
+    )
+
+    session.transpose("src", by=["grp"], id="visit", var=["score"], out="out")
+
+    output = session.to_arrow("out")
+    assert output.column("v1").type == pa.int32()
+    assert output.column("v2").type == pa.int32()
 
 
 def test_session_transpose_resolves_columns_case_insensitively() -> None:
@@ -503,6 +841,24 @@ def test_session_assign_raises_for_unsupported_functions() -> None:
         session.assign("src", out="out", invalid="unknown_func(name)")
 
 
+def test_session_assign_case_when_parse_error_uses_renderer_output() -> None:
+    session = Session()
+    session.load("src", pa.table({"name": ["Alice"], "bmi": [22.0]}))
+
+    with pytest.raises(ValueError) as error_info:
+        session.assign(
+            "src",
+            out="out",
+            bmi_flag="case when bmi >= then 'high' else 'low' end",
+        )
+
+    rendered = _strip_ansi(str(error_info.value))
+    assert "column_api_case_when_parse_error" in rendered.lower()
+    assert "assign:bmi_flag" in rendered
+    assert "case when bmi >= then 'high' else 'low' end" in rendered
+    assert "syntax error" in rendered.lower()
+
+
 def test_session_assign_resolves_expression_columns_case_insensitively() -> None:
     scenario = SESSION_METHOD_SCENARIOS["assign_case_insensitive"]
     session = Session()
@@ -518,6 +874,238 @@ def test_session_assign_resolves_expression_columns_case_insensitively() -> None
     assert session["out"].to_pylist() == scenario["expected_output"]
 
 
+def test_session_assign_supports_case_insensitive_function_names() -> None:
+    session = Session()
+    session.load(
+        "src",
+        pa.table(
+            {
+                "name": ["Alice"],
+                "weight": [50.0],
+                "height_m": [1.60],
+            }
+        ),
+    )
+
+    session.assign(
+        "src",
+        out="out",
+        name_up="UPCASE(name)",
+        bmi="ROUND(weight / (height_m * height_m), 0.01)",
+    )
+
+    assert session["out"].to_pylist() == [
+        {
+            "name": "Alice",
+            "weight": 50.0,
+            "height_m": 1.60,
+            "name_up": "ALICE",
+            "bmi": 19.53,
+        }
+    ]
+
+
+def test_session_assign_keeps_existing_numeric_column_types() -> None:
+    session = Session()
+    session.load(
+        "src",
+        pa.table(
+            {
+                "weight": pa.array([50.0, 80.0], type=pa.float32()),
+                "height_m": pa.array([1.60, 1.80], type=pa.float32()),
+            }
+        ),
+    )
+
+    session.assign(
+        "src",
+        out="out",
+        bmi="round(weight / (height_m * height_m), 0.01)",
+    )
+
+    output = session.to_arrow("out")
+    assert output.column("weight").type == pa.float32()
+    assert output.column("height_m").type == pa.float32()
+    assert output.column("bmi").type == pa.float64()
+
+
+def test_session_assign_uses_columnar_execution_without_row_evaluator() -> None:
+    session = Session()
+    session.load(
+        "src",
+        pa.table(
+            {
+                "name": ["Alice", "Bob"],
+                "weight": [50.0, 80.0],
+                "height_m": [1.60, 1.80],
+            }
+        ),
+    )
+
+    with patch(
+        "limulus.column_api.ExpressionEvaluator.evaluate_scalar",
+        side_effect=AssertionError("assign should not use row-wise scalar evaluation"),
+    ):
+        session.assign(
+            "src",
+            out="out",
+            cohort="'A'",
+            name_up="upcase(name)",
+            bmi="round(weight / (height_m * height_m), 0.01)",
+            summary="catx(':', name_up, cohort)",
+        )
+
+    assert session["out"].to_pylist() == [
+        {
+            "name": "Alice",
+            "weight": 50.0,
+            "height_m": 1.60,
+            "cohort": "A",
+            "name_up": "ALICE",
+            "bmi": 19.53,
+            "summary": "ALICE:A",
+        },
+        {
+            "name": "Bob",
+            "weight": 80.0,
+            "height_m": 1.80,
+            "cohort": "A",
+            "name_up": "BOB",
+            "bmi": 24.69,
+            "summary": "BOB:A",
+        },
+    ]
+
+
+def test_session_assign_supports_documented_columnar_function_registry() -> None:
+    session = Session()
+    session.load(
+        "src",
+        pa.table(
+            {
+                "name": ["hello world", "foo bar"],
+                "phrase": ["hello world", "foo bar"],
+            }
+        ),
+    )
+
+    session.assign(
+        "src",
+        out="out",
+        proper="propcase(name)",
+        joined="cat(name, ' test')",
+        stripped="cats(' a ', ' b ')",
+        right_trimmed="catt('hello ', ' world')",
+        position="index(name, 'world')",
+        replaced="tranwrd(phrase, 'hello', 'hi')",
+        translated="translate(phrase, 'HW', 'hw')",
+        len_all="length(name)",
+        len_nonblank="lengthn(name)",
+        trimmed="strip('  x  ')",
+        reversed="reverse(name)",
+        repeated="repeat('ab', 3)",
+        words="countw(name)",
+    )
+
+    assert session["out"].to_pylist() == [
+        {
+            "name": "hello world",
+            "phrase": "hello world",
+            "proper": "Hello World",
+            "joined": "hello world test",
+            "stripped": "ab",
+            "right_trimmed": "hello world",
+            "position": 7,
+            "replaced": "hi world",
+            "translated": "Hello World",
+            "len_all": 11,
+            "len_nonblank": 11,
+            "trimmed": "x",
+            "reversed": "dlrow olleh",
+            "repeated": "ababab",
+            "words": 2,
+        },
+        {
+            "name": "foo bar",
+            "phrase": "foo bar",
+            "proper": "Foo Bar",
+            "joined": "foo bar test",
+            "stripped": "ab",
+            "right_trimmed": "hello world",
+            "position": 0,
+            "replaced": "foo bar",
+            "translated": "foo bar",
+            "len_all": 7,
+            "len_nonblank": 7,
+            "trimmed": "x",
+            "reversed": "rab oof",
+            "repeated": "ababab",
+            "words": 2,
+        },
+    ]
+
+
+def test_session_assign_supports_put_input_and_hour_functions() -> None:
+    session = Session()
+    session.load(
+        "src",
+        pa.table(
+            {
+                "id": [7],
+                "amount": [12345.6],
+                "best_text": ["12345.6"],
+                "date_text": ["2024-02-03"],
+                "timestamp_text": ["2024-02-03T16:24:43"],
+                "clock_text": ["11:30"],
+            }
+        ),
+    )
+
+    session.assign(
+        "src",
+        out="out",
+        code="put(id, 'z5')",
+        fixed_text="put(amount, '8.1.')",
+        rounded_text="put(amount, '8.')",
+        comma_text="put(amount, 'comma8.1.')",
+        zero_scaled="put(amount, 'z8.1.')",
+        best_rendered="put(amount, 'best.')",
+        best_value="input(best_text, 'best.')",
+        visit_date="input(date_text, 'yymmdd10.')",
+        visit_iso="put(visit_date, 'e8601da.')",
+        timestamp_value="input(timestamp_text, 'e8601dt.')",
+        timestamp_iso="put(timestamp_value, 'e8601dt.')",
+        clock_value="input(clock_text, 'time.')",
+        clock_iso="put(clock_value, 'time.')",
+        clock_hour="hour(clock_text)",
+    )
+
+    assert session["out"].to_pylist() == [
+        {
+            "id": 7,
+            "amount": 12345.6,
+            "best_text": "12345.6",
+            "date_text": "2024-02-03",
+            "timestamp_text": "2024-02-03T16:24:43",
+            "clock_text": "11:30",
+            "code": "00007",
+            "fixed_text": "12345.6",
+            "rounded_text": "12346",
+            "comma_text": "12,345.6",
+            "zero_scaled": "012345.6",
+            "best_rendered": "12345.6",
+            "best_value": 12345.6,
+            "visit_date": dt.date(2024, 2, 3),
+            "visit_iso": "2024-02-03",
+            "timestamp_value": dt.datetime(2024, 2, 3, 16, 24, 43),
+            "timestamp_iso": "2024-02-03T16:24:43",
+            "clock_value": dt.time(11, 30),
+            "clock_iso": "11:30:00",
+            "clock_hour": 11.5,
+        }
+    ]
+
+
 def test_session_assign_case_when_parser_ignores_keywords_inside_string_literals() -> None:
     scenario = SESSION_METHOD_SCENARIOS["assign_case_when_keywords_in_strings"]
     session = Session()
@@ -530,3 +1118,16 @@ def test_session_assign_case_when_parser_ignores_keywords_inside_string_literals
     )
 
     assert session["out"].to_pylist() == scenario["expected_output"]
+
+
+def test_session_assign_ignores_function_like_text_inside_string_literals() -> None:
+    session = Session()
+    session.load("src", pa.table({"name": ["Alice"]}))
+
+    session.assign(
+        "src",
+        out="out",
+        marker="cat(name, ' unknown_func(')",
+    )
+
+    assert session["out"].to_pylist() == [{"name": "Alice", "marker": "Alice unknown_func("}]

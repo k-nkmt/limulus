@@ -1,0 +1,52 @@
+start: if_stmt
+
+if_stmt: IF condition (THEN action)?
+condition: condition_part+
+action: action_part+
+
+?condition_part: STRING
+               | NAME
+               | NUMBER
+               | COMPARE_WORD
+               | BOOL_WORD
+               | SYMBOL_OP
+               | COMMA
+               | DOT
+               | COLON
+               | LPAR condition? RPAR
+               | LBRACK condition? RBRACK
+               | LBRACE condition? RBRACE
+
+?action_part: STRING
+            | NAME
+            | NUMBER
+            | COMPARE_WORD
+            | BOOL_WORD
+            | SYMBOL_OP
+            | COMMA
+            | DOT
+            | COLON
+            | LPAR action? RPAR
+            | LBRACK action? RBRACK
+            | LBRACE action? RBRACE
+
+IF.5: /[iI][fF]/
+THEN.5: /[tT][hH][eE][nN]/
+COMPARE_WORD.4: /\b(?:[eE][qQ]|[nN][eE]|[gG][tT]|[lL][tT]|[gG][eE]|[lL][eE])\b/
+BOOL_WORD.4: /\b(?:[aA][nN][dD]|[oO][rR]|[nN][oO][tT])\b/
+NAME.1: /[A-Za-z_][\w\.]*/
+NUMBER: /(?:\d+\.\d*|\d+|\.\d+)(?:[eE][+-]?\d+)?/
+STRING: /'(?:''|[^'])*'|"(?:""|[^"])*"/
+SYMBOL_OP: />=|<=|!=|==|\^=|~=|¬=|\|\||\*\*|[-+*\/%^<>=]/
+COMMA: ","
+DOT: "."
+COLON: ":"
+LPAR: "("
+RPAR: ")"
+LBRACK: "["
+RBRACK: "]"
+LBRACE: "{"
+RBRACE: "}"
+
+%import common.WS_INLINE
+%ignore WS_INLINE

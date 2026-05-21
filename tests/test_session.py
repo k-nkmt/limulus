@@ -1,9 +1,15 @@
 import unittest
+import re
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import datetime as dt
 
 import pyarrow as pa
 import pytest
 
 from limulus import Session
+from limulus.native_bridge import load_native_module
 from limulus.runtime import DataStepExecutor
 from limulus.io_adapters import (
     DataFrameAdapterPandas,
@@ -12,7 +18,11 @@ from limulus.io_adapters import (
     InputSpec,
     OutputSpec,
 )
-from limulus.models import DataSetRef, ExecuteRequest, ExecuteResponse
+from limulus.models import DataSetRef, DiagnosticLabel, DiagnosticSpan, ExecuteRequest, ExecuteResponse, LogEntry, SubmitResult
+
+
+def _strip_ansi(text: str) -> str:
+    return re.sub(r"\x1b\[[0-9;]*m", "", text)
 
 SESSION_SCENARIOS = {
     "load_submit_dataset_access": {
@@ -831,6 +841,72 @@ def test_session_to_arrow_and_to_pandas() -> None:
     assert out_pandas.to_dict(orient="records") == scenario["expected_rows"]
 
 
+def test_session_submit_supports_put_input_and_hour_functions() -> None:
+    session = Session()
+    session.load(
+        "in",
+        pa.table(
+            {
+                "id": [7],
+                "amount": [12345.6],
+                "best_text": ["12345.6"],
+                "date_text": ["2024-02-03"],
+                "timestamp_text": ["2024-02-03T16:24:43"],
+                "clock_text": ["11:30"],
+            }
+        ),
+    )
+
+    result = session.submit(
+        """
+        data out;
+        set in;
+        code = put(id, z5.);
+        fixed_text = put(amount, 8.1.);
+        rounded_text = put(amount, 8.);
+        comma_text = put(amount, comma8.1.);
+        zero_scaled = put(amount, z8.1.);
+        best_rendered = put(amount, best.);
+        best_value = input(best_text, best.);
+        visit_date = input(date_text, yymmdd10.);
+        visit_iso = put(visit_date, e8601da.);
+        timestamp_value = input(timestamp_text, e8601dt.);
+        timestamp_iso = put(timestamp_value, e8601dt.);
+        clock_value = input(clock_text, time.);
+        clock_iso = put(clock_value, time.);
+        clock_hour = hour(clock_text);
+        output out;
+        run;
+        """
+    )
+
+    assert result.success is True
+    assert session["out"].to_pylist() == [
+        {
+            "id": 7,
+            "amount": 12345.6,
+            "best_text": "12345.6",
+            "date_text": "2024-02-03",
+            "timestamp_text": "2024-02-03T16:24:43",
+            "clock_text": "11:30",
+            "code": "00007",
+            "fixed_text": "12345.6",
+            "rounded_text": "12346",
+            "comma_text": "12,345.6",
+            "zero_scaled": "012345.6",
+            "best_rendered": "12345.6",
+            "best_value": 12345.6,
+            "visit_date": dt.date(2024, 2, 3),
+            "visit_iso": "2024-02-03",
+            "timestamp_value": dt.datetime(2024, 2, 3, 16, 24, 43),
+            "timestamp_iso": "2024-02-03T16:24:43",
+            "clock_value": dt.time(11, 30),
+            "clock_iso": "11:30:00",
+            "clock_hour": 11.5,
+        }
+    ]
+
+
 def test_if_then_do_else_do_routes_rows_exclusively() -> None:
     scenario = SESSION_SCENARIOS["if_then_do_else_do"]
     session = Session()
@@ -875,6 +951,82 @@ def test_session_submit_prints_log_on_failure(capsys: pytest.CaptureFixture[str]
 
     assert result.success is False
     assert "Error" in captured.out
+
+
+def test_session_submit_parse_failure_prints_source_excerpt(capsys: pytest.CaptureFixture[str]) -> None:
+    session = Session()
+
+    result = session.submit("data out;\n    invalid syntax;\nrun;")
+    captured = capsys.readouterr()
+    rendered = _strip_ansi(captured.out)
+
+    assert result.success is False
+    assert "parse_unsupported_statement" in rendered.lower()
+    assert "<dsl>:2:5" in rendered
+    assert "invalid syntax;" in rendered
+    assert "syntax error" in rendered.lower()
+
+
+def test_session_submit_ignores_leading_comment_statement() -> None:
+    session = Session()
+    session.load("inp", pa.table({"id": [1, 2]}))
+
+    result = session.submit("* comment;\ndata out;\n  set inp;\nrun;")
+
+    assert result.success is True
+    assert session["out"].to_pylist() == [{"id": 1}, {"id": 2}]
+
+
+def test_session_submit_ignores_block_comment_with_semicolon() -> None:
+    session = Session()
+    session.load("inp", pa.table({"id": [1, 2]}))
+
+    result = session.submit("data out;\n  /* comment ; still comment */\n  set inp;\nrun;")
+
+    assert result.success is True
+    assert session["out"].to_pylist() == [{"id": 1}, {"id": 2}]
+
+
+def test_session_submit_validation_error_shows_category_label() -> None:
+    session = Session()
+
+    result = session.submit("data out;\n  set dummy;\nrun;")
+
+    rendered = _strip_ansi(result.format_log())
+    assert result.success is False
+    assert "runtime_set_dataset_not_found" in rendered.lower()
+    assert "missing dataset" in rendered.lower()
+    assert "set dummy;" in rendered.lower()
+
+
+def test_session_submit_execute_error_uses_statement_excerpt() -> None:
+    session = Session()
+    session.load("inp", pa.table({"amount": [10]}))
+
+    result = session.submit("data out;\n  set inp;\n  total = unknown_func(amount);\nrun;")
+
+    rendered = _strip_ansi(result.format_log())
+    assert result.success is False
+    assert "runtime_expression_evaluation_error" in rendered.lower()
+    assert "[stage: execute]" in rendered.lower()
+    assert "total = unknown_func(amount)" in rendered
+    assert "expression error" in rendered.lower()
+    assert "^" in rendered
+
+
+def test_session_submit_execute_where_error_uses_statement_excerpt() -> None:
+    session = Session()
+    session.load("inp", pa.table({"amount": [10]}))
+
+    result = session.submit("data out;\n  set inp;\n  where amount >< 1;\nrun;")
+
+    rendered = _strip_ansi(result.format_log())
+    assert result.success is False
+    assert "runtime_operator_not_supported" in rendered.lower()
+    assert "[stage: execute]" in rendered.lower()
+    assert "where amount >< 1" in rendered.lower()
+    assert "operator error" in rendered.lower()
+    assert "^" in rendered
 
 
 def test_session_tracks_last_submit_result() -> None:
@@ -923,6 +1075,189 @@ def test_submit_result_print_log_on_failure_shows_status_elapsed_and_error(
     assert "success: False" in captured.out
     assert "seconds elapsed" in captured.out
     assert "Error" in captured.out
+
+
+def _failed_submit_result_for_renderer() -> SubmitResult:
+    span = DiagnosticSpan(start=10, end=17, line=1, column=11, end_line=1, end_column=18)
+    return SubmitResult(
+        success=False,
+        log=(
+            LogEntry(
+                code="TEST_RENDER",
+                severity="error",
+                message="renderer test failure",
+                stage="parse",
+                span=span,
+                labels=(DiagnosticLabel(span=span, message="problem"),),
+                source_text="data out; invalid syntax; run;",
+            ),
+        ),
+        elapsed_seq=0.01,
+    )
+
+
+def test_submit_result_print_log_uses_native_renderer_when_available(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    result = _failed_submit_result_for_renderer()
+    fake_module = SimpleNamespace(render_diagnostics_ariadne=lambda payload: "native-rendered")
+
+    with patch("limulus.renderer.load_native_module", return_value=(fake_module, None)):
+        result.print_log()
+    captured = capsys.readouterr()
+
+    assert "native-rendered" in captured.out
+
+
+def test_submit_result_print_log_falls_back_when_native_renderer_raises(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    result = _failed_submit_result_for_renderer()
+
+    def _raise_renderer(payload: object) -> str:
+        raise RuntimeError("render failed")
+
+    fake_module = SimpleNamespace(render_diagnostics_ariadne=_raise_renderer)
+
+    with patch("limulus.renderer.load_native_module", return_value=(fake_module, None)):
+        result.print_log()
+    captured = capsys.readouterr()
+
+    assert "error[test_render]" in captured.out.lower()
+    assert "renderer test failure" in captured.out
+    assert "^" in captured.out
+
+
+def test_session_submit_invalid_prx_pattern_renders_source_aware_excerpt() -> None:
+    session = Session()
+    session.load("in", pa.table({"name": ["Alice"]}))
+
+    result = session.submit("data out; set in; where prxmatch('/[/', name) > 0; output out; run;")
+
+    rendered = _strip_ansi(result.format_log())
+    assert result.success is False
+    assert "runtime_function_argument_invalid" in rendered.lower()
+    assert "<prxmatch-pattern>" in rendered
+    assert "/[/" in rendered
+    assert "regex syntax" in rendered.lower()
+    assert "^" in rendered
+
+
+def test_session_submit_invalid_prx_flag_renders_source_aware_excerpt() -> None:
+    session = Session()
+    session.load("in", pa.table({"name": ["Alice"]}))
+
+    result = session.submit("data out; set in; where prxmatch('/foo/z', name) > 0; output out; run;")
+
+    rendered = _strip_ansi(result.format_log())
+    assert result.success is False
+    assert "runtime_function_argument_invalid" in rendered.lower()
+    assert "<prxmatch-pattern>" in rendered
+    assert "/foo/z" in rendered
+    assert "unsupported prx flag" in rendered.lower()
+    assert "^" in rendered
+
+
+def test_native_ariadne_renderer_renders_multiple_diagnostics_and_notes() -> None:
+    native_module, error = load_native_module()
+
+    assert native_module is not None, error
+    if not callable(getattr(native_module, "render_diagnostics_ariadne", None)):
+        pytest.skip("installed native module does not expose render_diagnostics_ariadne in this test environment")
+
+    rendered = native_module.render_diagnostics_ariadne(
+        {
+            "source_id": "<dsl>",
+            "source_text": "data out; set in; keep id missing; run;",
+            "diagnostics": [
+                {
+                    "code": "VALIDATE_COLUMN_NOT_FOUND",
+                    "severity": "error",
+                    "message": "KEEP statement references unknown variable: missing",
+                    "stage": "validate",
+                    "span": {
+                        "start": 18,
+                        "end": 33,
+                        "line": 1,
+                        "column": 19,
+                        "end_line": 1,
+                        "end_column": 34,
+                        "source_id": "<dsl>",
+                    },
+                    "labels": [
+                        {
+                            "span": {
+                                "start": 23,
+                                "end": 30,
+                                "line": 1,
+                                "column": 24,
+                                "end_line": 1,
+                                "end_column": 31,
+                                "source_id": "<dsl>",
+                            },
+                            "message": "unknown variable",
+                            "kind": "primary",
+                        },
+                        {
+                            "span": {
+                                "start": 18,
+                                "end": 22,
+                                "line": 1,
+                                "column": 19,
+                                "end_line": 1,
+                                "end_column": 23,
+                                "source_id": "<dsl>",
+                            },
+                            "message": "KEEP clause",
+                            "kind": "secondary",
+                        },
+                    ],
+                    "notes": ["validate checks only statically derivable identifiers"],
+                },
+                {
+                    "code": "PARSE_UNSUPPORTED_STATEMENT",
+                    "severity": "error",
+                    "message": "Unsupported statement syntax",
+                    "stage": "parse",
+                    "span": {
+                        "start": 10,
+                        "end": 17,
+                        "line": 1,
+                        "column": 11,
+                        "end_line": 1,
+                        "end_column": 18,
+                        "source_id": "<dsl>",
+                    },
+                    "labels": [
+                        {
+                            "span": {
+                                "start": 10,
+                                "end": 17,
+                                "line": 1,
+                                "column": 11,
+                                "end_line": 1,
+                                "end_column": 18,
+                                "source_id": "<dsl>",
+                            },
+                            "message": "syntax error",
+                            "kind": "primary",
+                        }
+                    ],
+                    "notes": ["second diagnostic"],
+                    "source_text": "data out; invalid syntax; run;",
+                },
+            ],
+        }
+    )
+    stripped = _strip_ansi(rendered)
+
+    assert "VALIDATE_COLUMN_NOT_FOUND" in stripped
+    assert "PARSE_UNSUPPORTED_STATEMENT" in stripped
+    assert "KEEP clause" in stripped
+    assert "unknown variable" in stripped
+    assert "syntax error" in stripped
+    assert "validate checks only statically derivable identifiers" in stripped
+    assert "second diagnostic" in stripped
 
 
 def test_session_backend_preferences_can_be_provided_at_init() -> None:

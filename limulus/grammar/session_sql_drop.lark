@@ -1,0 +1,12 @@
+?start: drop_table_stmt
+
+drop_table_stmt: DROP TABLE sql_name
+sql_name: NAME (DOT NAME)*
+
+DROP.5: /[dD][rR][oO][pP]/
+TABLE.5: /[tT][aA][bB][lL][eE]/
+NAME.4: /[A-Za-z_][\w]*/
+DOT: "."
+
+%import common.WS_INLINE
+%ignore WS_INLINE

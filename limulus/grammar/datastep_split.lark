@@ -1,0 +1,41 @@
+start: statement (";" statement)* ";"?
+
+statement: data_stmt
+         | run_stmt
+         | skip_stmt
+         | other_stmt
+
+skip_stmt: macro_line_stmt
+         | macro_block_stmt
+         | proc_block_stmt
+
+macro_line_stmt: MACRO_LINE
+macro_block_stmt: MACRO_BLOCK
+proc_block_stmt: PROC_BLOCK
+
+data_stmt: DATA_KW stmt_tail?
+run_stmt: RUN_KW stmt_tail?
+other_stmt: stmt_tail
+
+stmt_tail: stmt_part+
+stmt_part: SQ_STRING
+         | DQ_STRING
+         | OTHER_TEXT
+
+DATA_KW.5: /[dD][aA][tT][aA]\b/
+RUN_KW.5: /[rR][uU][nN]\b/
+MACRO_LINE.10: /%(?:[lL][eE][tT]|[pP][uU][tT])\b(?:[^;'"]|'(?:''|[^'])*'|"(?:""|[^"])*")*|%\*(?:[^;'"]|'(?:''|[^'])*'|"(?:""|[^"])*")*/
+MACRO_BLOCK.10: /%[mM][aA][cC][rR][oO]\b(?:[^'"]|'(?:''|[^'])*'|"(?:""|[^"])*")*?%[mM][eE][nN][dD]\b(?:\s+[A-Za-z_][A-Za-z0-9_]*)?\s*/
+PROC_BLOCK.10: /[pP][rR][oO][cC]\b(?:[^'"]|'(?:''|[^'])*'|"(?:""|[^"])*")*?(?:\b[rR][uU][nN]\b|\b[qQ][uU][iI][tT]\b)\s*/
+SQ_STRING: /'(?:''|[^'])*'/
+DQ_STRING: /"(?:""|[^"])*"/
+OTHER_TEXT: /(?!([dD][aA][tT][aA]|[rR][uU][nN])\b)[^;'"\s]+/
+
+LINE_COMMENT.10: /\*(?!\/)[^;]*;/
+BLOCK_COMMENT.10: /\/\*[\s\S]*?\*\//
+
+%ignore LINE_COMMENT
+%ignore BLOCK_COMMENT
+
+%import common.WS
+%ignore WS

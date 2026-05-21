@@ -1,0 +1,10 @@
+start: assignment_token
+
+assignment_token: KEY EQUALS VALUE
+
+KEY: /[A-Za-z_][\w]*/
+EQUALS: "="
+VALUE: /(.|\n)+/
+
+%import common.WS_INLINE
+%ignore WS_INLINE

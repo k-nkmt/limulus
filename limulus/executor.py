@@ -3,6 +3,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from ._naming import _column_key
 from .backends import (
     PythonRuntimeBackend,
     RustNativeBlockExecutor,
@@ -11,14 +12,16 @@ from .backends import (
     RustArrowIOBridge,
     RustRuntimeBackend,
 )
+from .block_splitter import DataStepBlockSplitter
 from .evaluator import ExpressionEvaluator
+from .format_registry import FormatRegistry
 from .io_adapters import (
     DataFrameAdapterPandas,
     DataInputAdapterArrow,
     DataOutputAdapterArrow,
 )
 from .io import ExecutorIOService
-from .models import CompatibilityNotice, DataSetRef, Diagnostic, ExecuteRequest, ExecuteResponse, OutputConversionResult
+from .models import CompatibilityNotice, DataSetRef, Diagnostic, DiagnosticLabel, ExecuteRequest, ExecuteResponse, OutputConversionResult
 from .parser import (
     DatasetReference,
     ParserBackendSelector,
@@ -28,6 +31,7 @@ from .parser import (
     PythonParserBackend,
     RustNativeParserBackend,
     SetStatementOptionSpec,
+    SplitStageParserService,
 )
 from .runtime import PDVRuntimeService, ProgramExecutionService
 from .executor_python import PythonBackendExecutionService
@@ -121,13 +125,42 @@ class NoOpMacroHook:
         return dsl_text
 
 
+class UnsupportedSyntaxMacroHook:
+    def __init__(self, parser_service: SplitStageParserService | None = None) -> None:
+        self._parser_service = parser_service or SplitStageParserService()
+
+    def evaluate(self, dsl_text: str) -> str:
+        regions = self._parser_service.extract_statement_regions(dsl_text)
+        if regions is None:
+            return dsl_text
+
+        ranges = [self._expand_skip_region(dsl_text, region.start, region.end) for region in regions if region.kind == "SKIP"]
+        if not ranges:
+            return dsl_text
+
+        masked = list(dsl_text)
+        for start, end in ranges:
+            for index in range(start, end):
+                if masked[index] not in {"\n", "\r"}:
+                    masked[index] = " "
+        return "".join(masked)
+
+    @staticmethod
+    def _expand_skip_region(dsl_text: str, start: int, end: int) -> tuple[int, int]:
+        if end < len(dsl_text) and dsl_text[end] == ";":
+            return start, end + 1
+        return start, end
+
+
 class ExecutionPipelineCoordinator:
     _STAGE_SPLIT = "split blocks"
     _STAGE_MACRO = "macro hook"
     _STAGE_PARSE = "parse"
+    _STAGE_VALIDATE = "validate"
     _STAGE_INPUT_OPTION = "resolve inputs"
     _STAGE_INPUT_PREPARE = "pre-processing inputs"
     _STAGE_EVAL_PREPARE = "pre-evaluations"
+    _STAGE_PLAN = "plan generation"
     _STAGE_EXECUTE = "execute"
     _STAGE_OUTPUT_OPTION = "resolve outputs"
 
@@ -140,30 +173,20 @@ class ExecutionPipelineCoordinator:
         if request_diagnostics:
             return ExecuteResponse(diagnostics=self._tag_stage(request_diagnostics, self._STAGE_SPLIT))
 
-        split_blocks = self._executor._split_data_step_blocks(request.dsl_text)
+        transformed_dsl, macro_diagnostics = self._apply_macro_hook(request.dsl_text)
+        if macro_diagnostics:
+            return ExecuteResponse(diagnostics=self._tag_stage(macro_diagnostics, self._STAGE_MACRO))
+
+        split_blocks = self._executor._split_data_step_blocks(transformed_dsl)
         if not split_blocks:
             return ExecuteResponse(diagnostics=tuple())
-
-        macro_blocks, macro_diagnostics = self._apply_macro_hook(split_blocks)
-        if macro_diagnostics:
-            include_block_location = len(split_blocks) > 1
-            return ExecuteResponse(
-                diagnostics=self._tag_stage(
-                    self._executor._with_block_location(
-                        diagnostics=tuple(macro_diagnostics),
-                        block_index=1,
-                        include_block_location=include_block_location,
-                    ),
-                    self._STAGE_MACRO,
-                )
-            )
 
         parser_backend = self._executor._parser_backend_selector.select(self._executor._parser_backend_preference)
         self._executor._last_parser_backend = parser_backend.name
 
         parsed_blocks: list[tuple[str, Any]] = []
-        include_block_location = len(macro_blocks) > 1
-        for block_index, block_dsl in enumerate(macro_blocks, start=1):
+        include_block_location = len(split_blocks) > 1
+        for block_index, block_dsl in enumerate(split_blocks, start=1):
             parse_result = parser_backend.parse(ParserExecutionContext(dsl_text=block_dsl))
             if parse_result.has_errors:
                 if parser_backend.name != "python":
@@ -192,10 +215,6 @@ class ExecutionPipelineCoordinator:
             names: set[str] = set()
             if source_statement is not None:
                 names.update(self._executor._dataset_name_key(ref.name) for ref in source_statement.dataset_refs)
-                if not names:
-                    source_tokens = source_statement.text.split()
-                    if len(source_tokens) >= 2:
-                        names.add(self._executor._dataset_name_key(source_tokens[1]))
             required_input_names_by_block.append(names)
 
         future_required_after_block: list[set[str]] = [set() for _ in parsed_blocks]
@@ -211,6 +230,24 @@ class ExecutionPipelineCoordinator:
         explicit_input_names = {self._executor._dataset_name_key(name) for name in explicit_inputs.keys()}
 
         for block_index, (block_dsl, ast_statements) in enumerate(parsed_blocks, start=1):
+            validation_diagnostics = self._executor._validate_ast_block(
+                ast_statements=ast_statements,
+                dsl_text=block_dsl,
+                explicit_inputs=explicit_inputs,
+                available_inputs=available_inputs,
+                explicit_output_targets=request.output_targets,
+            )
+            if validation_diagnostics:
+                return ExecuteResponse(
+                    diagnostics=self._tag_stage(
+                        self._executor._with_block_location(
+                            diagnostics=validation_diagnostics,
+                            block_index=block_index,
+                            include_block_location=include_block_location,
+                        ),
+                        self._STAGE_VALIDATE,
+                    )
+                )
 
             resolved_output_targets, output_target_diagnostics = self._executor._resolve_output_targets(
                 ast_statements=ast_statements,
@@ -279,6 +316,12 @@ class ExecutionPipelineCoordinator:
                 )
             ast_statements = prepared_statements
             resolved_inputs = prepared_eval_inputs
+            execution_plan = self._generate_execution_plan(
+                request=request,
+                ast_statements=ast_statements,
+                resolved_inputs=resolved_inputs,
+                resolved_output_targets=resolved_output_targets,
+            )
 
             execution_outputs, execution_diagnostics = self._executor._execute_program(
                 RuntimeExecutionContext(
@@ -286,6 +329,7 @@ class ExecutionPipelineCoordinator:
                     ast_statements=ast_statements,
                     resolved_inputs=resolved_inputs,
                     resolved_output_targets=resolved_output_targets,
+                    execution_plan=execution_plan,
                 )
             )
             if execution_diagnostics:
@@ -348,6 +392,17 @@ class ExecutionPipelineCoordinator:
         outputs_arrow = _LazyArrowOutputs(combined_outputs, self._executor._io_service.dataset_ref_to_arrow_table)
         return ExecuteResponse(outputs=combined_outputs, outputs_arrow=outputs_arrow, notices=tuple(combined_notices))
 
+    def _generate_execution_plan(
+        self,
+        *,
+        request: ExecuteRequest,
+        ast_statements: Sequence[Any],
+        resolved_inputs: Mapping[str, DataSetRef],
+        resolved_output_targets: tuple[str, ...],
+    ) -> Any | None:
+        del request, ast_statements, resolved_inputs, resolved_output_targets
+        return None
+
     def _validate_request(self, request: ExecuteRequest) -> tuple[Diagnostic, ...]:
         diagnostics: list[Diagnostic] = []
 
@@ -382,21 +437,17 @@ class ExecutionPipelineCoordinator:
 
         return tuple(diagnostics)
 
-    def _apply_macro_hook(self, blocks: Sequence[str]) -> tuple[tuple[str, ...], tuple[Diagnostic, ...]]:
-        transformed: list[str] = []
-        for block in blocks:
-            try:
-                expanded = self._macro_hook.evaluate(block)
-            except Exception as error:
-                return (), (
-                    Diagnostic(
-                        code="MACRO_EVALUATION_FAILED",
-                        severity="error",
-                        message=f"macro hook failed: {error}",
-                    ),
-                )
-            transformed.append(expanded)
-        return tuple(transformed), ()
+    def _apply_macro_hook(self, dsl_text: str) -> tuple[str, tuple[Diagnostic, ...]]:
+        try:
+            return self._macro_hook.evaluate(dsl_text), ()
+        except Exception as error:
+            return "", (
+                Diagnostic(
+                    code="MACRO_EVALUATION_FAILED",
+                    severity="error",
+                    message=f"macro hook failed: {error}",
+                ),
+            )
 
     def _tag_stage(self, diagnostics: Sequence[Diagnostic], stage: str) -> tuple[Diagnostic, ...]:
         tagged: list[Diagnostic] = []
@@ -408,6 +459,10 @@ class ExecutionPipelineCoordinator:
                     message=diagnostic.message,
                     location=diagnostic.location,
                     stage=diagnostic.stage or stage,
+                    span=diagnostic.span,
+                    labels=diagnostic.labels,
+                    notes=diagnostic.notes,
+                    source_text=diagnostic.source_text,
                 )
             )
         return tuple(tagged)
@@ -418,9 +473,17 @@ class DataStepExecutor:
     _PREPARED_MERGE_ROWS_MARKER = "#prepared_merge_rows"
     _PREPARED_INTERNAL_VARS_MARKER = "|internal="
 
-    def __init__(self, runtime_backend: str = "python", parser_backend: str = "python") -> None:
+    def __init__(
+        self,
+        runtime_backend: str = "python",
+        parser_backend: str = "python",
+        *,
+        format_registry: FormatRegistry | None = None,
+        macro_hook: MacroHook | None = None,
+    ) -> None:
         self._parser = ParserService()
-        self._runtime = PDVRuntimeService()
+        self._block_splitter = DataStepBlockSplitter(parser_service=self._parser)
+        self._runtime = PDVRuntimeService(format_registry=format_registry)
         self._evaluator = ExpressionEvaluator(eval_scope_provider=lambda: self._runtime.get_eval_scope())
         self._arrow_input = DataInputAdapterArrow()
         self._arrow_output = DataOutputAdapterArrow()
@@ -453,7 +516,10 @@ class DataStepExecutor:
             python_backend=PythonParserBackend(self._parser),
             rust_backend=RustNativeParserBackend(self._parser),
         )
-        self._pipeline = ExecutionPipelineCoordinator(executor=self)
+        self._pipeline = ExecutionPipelineCoordinator(
+            executor=self,
+            macro_hook=macro_hook or UnsupportedSyntaxMacroHook(),
+        )
 
     def register_table(self, name: str, dataset: DataSetRef) -> None:
         self._registered_tables[name] = dataset
@@ -531,6 +597,521 @@ class DataStepExecutor:
             available_inputs=available_inputs,
             registered_tables=self._registered_tables,
         )
+
+    def _validate_ast_block(
+        self,
+        *,
+        ast_statements: Sequence[Any],
+        dsl_text: str,
+        explicit_inputs: Mapping[str, DataSetRef],
+        available_inputs: Mapping[str, DataSetRef],
+        explicit_output_targets: Sequence[str],
+    ) -> tuple[Diagnostic, ...]:
+        diagnostics: list[Diagnostic] = []
+        diagnostics.extend(
+            self._validate_reserved_output_targets(
+                ast_statements=ast_statements,
+                dsl_text=dsl_text,
+                explicit_output_targets=explicit_output_targets,
+            )
+        )
+        diagnostics.extend(
+            self._validate_input_dataset_refs(
+                ast_statements=ast_statements,
+                dsl_text=dsl_text,
+                explicit_inputs=explicit_inputs,
+                available_inputs=available_inputs,
+            )
+        )
+        if diagnostics:
+            return tuple(diagnostics)
+        diagnostics.extend(
+            self._validate_static_column_refs(
+                ast_statements=ast_statements,
+                dsl_text=dsl_text,
+                explicit_inputs=explicit_inputs,
+                available_inputs=available_inputs,
+            )
+        )
+        return tuple(diagnostics)
+
+    def _validate_reserved_output_targets(
+        self,
+        *,
+        ast_statements: Sequence[Any],
+        dsl_text: str,
+        explicit_output_targets: Sequence[str],
+    ) -> list[Diagnostic]:
+        diagnostics: list[Diagnostic] = []
+        if explicit_output_targets:
+            targets = tuple(self._normalize_dataset_name(target) for target in explicit_output_targets)
+            statement = None
+        else:
+            targets = self._merge_unique_targets(
+                self._extract_data_targets(ast_statements),
+                self._io_service.extract_output_targets(ast_statements),
+            )
+            statement = next((item for item in ast_statements if item.kind in {"DATA", "OUTPUT"}), None)
+
+        for target in targets:
+            key = self._dataset_name_key(target)
+            if key != "DICTIONARY" and not key.startswith("DICTIONARY."):
+                continue
+            diagnostics.append(
+                self._build_validate_diagnostic(
+                    code="VALIDATE_RESERVED_OUTPUT_TARGET",
+                    message=f"Reserved output target is not allowed: {target}",
+                    statement=statement,
+                    dsl_text=dsl_text,
+                )
+            )
+        return diagnostics
+
+    def _validate_input_dataset_refs(
+        self,
+        *,
+        ast_statements: Sequence[Any],
+        dsl_text: str,
+        explicit_inputs: Mapping[str, DataSetRef],
+        available_inputs: Mapping[str, DataSetRef],
+    ) -> list[Diagnostic]:
+        source_statement = next(
+            (statement for statement in ast_statements if statement.kind in {"SET", "MERGE"}),
+            None,
+        )
+        if source_statement is None:
+            return []
+
+        source_refs = tuple(getattr(source_statement, "dataset_refs", ()) or ())
+        input_names = [ref.name for ref in source_refs if getattr(ref, "name", "")]
+        if not input_names:
+            source_tokens = getattr(source_statement, "text", "").split()
+            if len(source_tokens) >= 2:
+                input_names = [source_tokens[1]]
+        if not input_names:
+            return [
+                self._build_validate_diagnostic(
+                    code="RUNTIME_SET_DATASET_NOT_FOUND",
+                    message="SET statement requires an input dataset name.",
+                    statement=source_statement,
+                    dsl_text=dsl_text,
+                )
+            ]
+
+        candidates: dict[str, DataSetRef] = {}
+        candidates.update(self._registered_tables)
+        candidates.update(available_inputs)
+        candidates.update(explicit_inputs)
+
+        diagnostics: list[Diagnostic] = []
+        for input_name in input_names:
+            if self._resolve_dataset_alias(candidates, input_name) is not None:
+                continue
+            diagnostics.append(
+                self._build_validate_diagnostic(
+                    code="RUNTIME_SET_DATASET_NOT_FOUND",
+                    message=f"Input dataset is not provided: {input_name}",
+                    statement=source_statement,
+                    dsl_text=dsl_text,
+                )
+            )
+        return diagnostics
+
+    def _build_validate_diagnostic(
+        self,
+        *,
+        code: str,
+        message: str,
+        statement: Any | None,
+        dsl_text: str,
+        label_message: str | None = None,
+    ) -> Diagnostic:
+        span = getattr(statement, "span", None)
+        resolved_label = label_message or self._validate_label_message(code)
+        return Diagnostic(
+            code=code,
+            severity="error",
+            message=message,
+            span=span,
+            labels=((DiagnosticLabel(span=span, message=resolved_label),) if span is not None else ()),
+            source_text=dsl_text if span is not None else None,
+        )
+
+    @staticmethod
+    def _validate_label_message(code: str) -> str:
+        categories = {
+            "RUNTIME_SET_DATASET_NOT_FOUND": "missing dataset",
+            "VALIDATE_RESERVED_OUTPUT_TARGET": "reserved name",
+            "VALIDATE_COLUMN_NOT_FOUND": "unknown variable",
+            "RUNTIME_BY_PRECONDITION_FAILED": "missing BY key",
+            "RUNTIME_RENAME_STATEMENT_INVALID": "invalid rename",
+            "RUNTIME_DATASET_OPTION_INVALID": "invalid dataset option",
+        }
+        return categories.get(code, "validation issue")
+
+    def _validate_static_column_refs(
+        self,
+        *,
+        ast_statements: Sequence[Any],
+        dsl_text: str,
+        explicit_inputs: Mapping[str, DataSetRef],
+        available_inputs: Mapping[str, DataSetRef],
+    ) -> list[Diagnostic]:
+        source_statement = next(
+            (statement for statement in ast_statements if statement.kind in {"SET", "MERGE"}),
+            None,
+        )
+        if source_statement is None:
+            return []
+
+        candidates: dict[str, DataSetRef] = {}
+        candidates.update(self._registered_tables)
+        candidates.update(available_inputs)
+        candidates.update(explicit_inputs)
+
+        source_refs = tuple(getattr(source_statement, "dataset_refs", ()) or ())
+        source_columns: dict[str, set[str]] = {}
+        available_columns: set[str] = set()
+        diagnostics: list[Diagnostic] = []
+
+        for source_ref in source_refs:
+            input_ref = self._resolve_dataset_alias(candidates, source_ref.name)
+            if input_ref is None:
+                continue
+            columns = self._infer_dataset_columns(input_ref)
+            if columns is None:
+                continue
+            transformed_columns, option_diagnostics = self._apply_source_option_columns_for_validate(
+                columns=columns,
+                source_name=source_ref.name,
+                option_spec=source_ref.options,
+                statement=source_statement,
+                dsl_text=dsl_text,
+            )
+            if option_diagnostics:
+                diagnostics.extend(option_diagnostics)
+                return diagnostics
+            source_key = self._dataset_name_key(source_ref.name)
+            source_columns[source_key] = transformed_columns
+            available_columns.update(transformed_columns)
+
+        by_keys = self._extract_variable_list(ast_statements, "BY")
+        in_option_vars = [
+            ref.options.in_var
+            for ref in source_refs
+            if getattr(getattr(ref, "options", None), "in_var", None) is not None
+        ]
+        statement_options = getattr(source_statement, "statement_options", None)
+        available_columns.update(
+            self._collect_internal_variable_names(
+                in_option_vars=in_option_vars,
+                indsname_var=getattr(statement_options, "indsname_var", None),
+                end_var=getattr(statement_options, "end_var", None),
+                by_keys=by_keys,
+            )
+        )
+        available_columns.update(self._collect_step_defined_columns(ast_statements))
+
+        for statement in ast_statements:
+            if statement.kind == "BY":
+                for by_key in self._extract_variable_list((statement,), "BY"):
+                    normalized_by_key = _column_key(by_key)
+                    missing_in_sources = [
+                        source_name
+                        for source_name, columns in source_columns.items()
+                        if normalized_by_key not in {_column_key(column) for column in columns}
+                    ]
+                    if missing_in_sources:
+                        diagnostics.append(
+                            self._build_validate_diagnostic(
+                                code="RUNTIME_BY_PRECONDITION_FAILED",
+                                message=f"BY key '{by_key}' is missing in source rows.",
+                                statement=statement,
+                                dsl_text=dsl_text,
+                                label_message="missing BY key",
+                            )
+                        )
+                        return diagnostics
+                continue
+
+            column_diagnostic = self._validate_statement_column_refs(
+                statement=statement,
+                available_columns=available_columns,
+                dsl_text=dsl_text,
+            )
+            if column_diagnostic is not None:
+                diagnostics.append(column_diagnostic)
+                return diagnostics
+
+        return diagnostics
+
+    def _validate_statement_column_refs(
+        self,
+        *,
+        statement: Any,
+        available_columns: set[str],
+        dsl_text: str,
+    ) -> Diagnostic | None:
+        if statement.kind == "RENAME":
+            rename_validation = self._validate_rename_statement_contract(statement.rename_map)
+            if rename_validation is not None:
+                return self._build_validate_diagnostic(
+                    code=rename_validation.code,
+                    message=rename_validation.message,
+                    statement=statement,
+                    dsl_text=dsl_text,
+                    label_message="invalid rename",
+                )
+            referenced_columns = tuple(statement.rename_map)
+            diagnostic_code = "RUNTIME_RENAME_STATEMENT_INVALID"
+        else:
+            referenced_columns = self._extract_statement_column_refs(statement)
+            diagnostic_code = "VALIDATE_COLUMN_NOT_FOUND"
+
+        if not referenced_columns:
+            return None
+
+        normalized_available = {_column_key(name) for name in available_columns}
+        missing = [name for name in referenced_columns if _column_key(name) not in normalized_available]
+        if not missing:
+            return None
+
+        return self._build_validate_diagnostic(
+            code=diagnostic_code,
+            message=f"{statement.kind} statement references unknown variable: {missing[0]}",
+            statement=statement,
+            dsl_text=dsl_text,
+            label_message="unknown variable",
+        )
+
+    def _extract_statement_column_refs(self, statement: Any) -> tuple[str, ...]:
+        if statement.kind in {"KEEP", "DROP"}:
+            return self._extract_variable_list((statement,), statement.kind)
+
+        if statement.kind == "LABEL":
+            return tuple(statement.label_map)
+
+        return ()
+
+    def _collect_step_defined_columns(self, ast_statements: Sequence[Any]) -> set[str]:
+        defined: set[str] = set()
+
+        for statement in ast_statements:
+            if statement.kind == "ASSIGN":
+                target = self._extract_assignment_target(statement.text)
+                if target is not None:
+                    defined.add(target)
+                continue
+
+            if statement.kind == "SUM":
+                target = self._extract_sum_target(statement.text)
+                if target is not None:
+                    defined.add(target)
+                continue
+
+            if statement.kind in {"IF", "ELSE IF"}:
+                target = self._extract_if_then_target(statement)
+                if target is not None:
+                    defined.add(target)
+                continue
+
+            if statement.kind == "DO":
+                loop_var = getattr(getattr(statement, "do_spec", None), "loop_var", None)
+                if loop_var:
+                    defined.add(loop_var)
+                continue
+
+            if statement.kind == "ARRAY":
+                variables = getattr(getattr(statement, "array_spec", None), "variables", ())
+                defined.update(name for name in variables if name)
+                continue
+
+            if statement.kind == "RETAIN":
+                defined.update(self._extract_retain_targets(statement.text))
+
+        return defined
+
+    def _extract_assignment_target(self, statement_text: str) -> str | None:
+        matched = re.match(r"^\s*([A-Za-z_][A-Za-z0-9_\.]*)\s*(?:[\(\[\{].*?[\)\]\}])?\s*=", statement_text)
+        if matched is None:
+            return None
+        return matched.group(1)
+
+    def _extract_sum_target(self, statement_text: str) -> str | None:
+        matched = re.match(r"^\s*([A-Za-z_][A-Za-z0-9_\.]*)\s*\+\s*(.+?)\s*$", statement_text)
+        if matched is None:
+            return None
+        return matched.group(1)
+
+    def _extract_retain_targets(self, statement_text: str) -> tuple[str, ...]:
+        body = statement_text.strip()
+        if body.lower().startswith("retain"):
+            body = body[6:].strip()
+        if not body:
+            return ()
+
+        tokens = body.split()
+        names: list[str] = []
+        for token in tokens:
+            if re.fullmatch(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)", token):
+                continue
+            if token.startswith(("'", '"')):
+                continue
+            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_\.]*", token):
+                names.append(token)
+        return tuple(names)
+
+    def _extract_if_then_target(self, statement: Any) -> str | None:
+        if_spec = getattr(statement, "if_spec", None)
+        action = getattr(if_spec, "then_action", None)
+        if not isinstance(action, str) or not action.strip():
+            return None
+        target = self._extract_assignment_target(action)
+        if target is not None:
+            return target
+        return self._extract_sum_target(action)
+
+    def _infer_dataset_columns(self, input_ref: DataSetRef) -> set[str] | None:
+        normalized_kind = input_ref.kind.strip().lower()
+        payload = input_ref.payload
+        if normalized_kind == "arrow_table" and hasattr(payload, "schema"):
+            schema = getattr(payload, "schema", None)
+            names = getattr(schema, "names", None)
+            if names is not None:
+                return set(str(name) for name in names)
+
+        rows, load_error = self._io_service.load_input_rows(input_ref)
+        if load_error is not None:
+            return None
+        columns: set[str] = set()
+        for row in rows:
+            if isinstance(row, Mapping):
+                columns.update(str(name) for name in row.keys())
+        return columns
+
+    @staticmethod
+    def _resolve_row_key(row: Mapping[str, Any], name: str) -> str | None:
+        if name in row:
+            return name
+
+        normalized = _column_key(name)
+        for candidate in row.keys():
+            if _column_key(candidate) == normalized:
+                return candidate
+        return None
+
+    def _resolve_row_value(self, row: Mapping[str, Any], name: str) -> Any:
+        resolved = self._resolve_row_key(row, name)
+        if resolved is None:
+            return None
+        return row.get(resolved)
+
+    @staticmethod
+    def _build_case_insensitive_scope(row: Mapping[str, Any]) -> dict[str, Any]:
+        scope = dict(row)
+        for column_name, value in row.items():
+            scope.setdefault(_column_key(column_name), value)
+            scope.setdefault(column_name.lower(), value)
+        return scope
+
+    def _apply_source_option_columns_for_validate(
+        self,
+        *,
+        columns: set[str],
+        source_name: str,
+        option_spec: Any,
+        statement: Any,
+        dsl_text: str,
+    ) -> tuple[set[str], list[Diagnostic]]:
+        working = set(columns)
+        keep_vars = tuple(getattr(option_spec, "keep_vars", ()))
+        drop_vars = tuple(getattr(option_spec, "drop_vars", ()))
+        rename_map = dict(getattr(option_spec, "rename_map", {}))
+
+        def resolve_column(name: str) -> str | None:
+            normalized_name = _column_key(name)
+            for candidate in working:
+                if _column_key(candidate) == normalized_name:
+                    return candidate
+            return None
+
+        if keep_vars:
+            missing = [name for name in keep_vars if resolve_column(name) is None]
+            if missing:
+                return set(), [
+                    self._build_validate_diagnostic(
+                        code="VALIDATE_COLUMN_NOT_FOUND",
+                        message=f"Dataset option KEEP= references unknown variable '{missing[0]}' for source '{source_name}'.",
+                        statement=statement,
+                        dsl_text=dsl_text,
+                        label_message="unknown variable",
+                    )
+                ]
+            working = {resolved for name in keep_vars if (resolved := resolve_column(name)) is not None}
+
+        if drop_vars:
+            missing = [name for name in drop_vars if resolve_column(name) is None]
+            if missing:
+                return set(), [
+                    self._build_validate_diagnostic(
+                        code="VALIDATE_COLUMN_NOT_FOUND",
+                        message=f"Dataset option DROP= references unknown variable '{missing[0]}' for source '{source_name}'.",
+                        statement=statement,
+                        dsl_text=dsl_text,
+                        label_message="unknown variable",
+                    )
+                ]
+            drop_columns = {resolved for name in drop_vars if (resolved := resolve_column(name)) is not None}
+            working.difference_update(drop_columns)
+
+        if rename_map:
+            if len({_column_key(value) for value in rename_map.values()}) != len(rename_map):
+                return set(), [
+                    self._build_validate_diagnostic(
+                        code="RUNTIME_DATASET_OPTION_INVALID",
+                        message=f"Dataset option RENAME= has duplicate target names for source '{source_name}'.",
+                        statement=statement,
+                        dsl_text=dsl_text,
+                        label_message="invalid rename",
+                    )
+                ]
+            missing = [name for name in rename_map if resolve_column(name) is None]
+            if missing:
+                return set(), [
+                    self._build_validate_diagnostic(
+                        code="RUNTIME_DATASET_OPTION_INVALID",
+                        message=f"Dataset option RENAME= references unknown variable '{missing[0]}' for source '{source_name}'.",
+                        statement=statement,
+                        dsl_text=dsl_text,
+                        label_message="unknown variable",
+                    )
+                ]
+            resolved_rename_map = {
+                resolved: new_name
+                for old_name, new_name in rename_map.items()
+                if (resolved := resolve_column(old_name)) is not None
+            }
+            working = {resolved_rename_map.get(name, name) for name in working}
+
+        return working, []
+
+    def _validate_rename_statement_contract(self, rename_map: Mapping[str, str]) -> Diagnostic | None:
+        if len(set(rename_map.values())) != len(rename_map):
+            return Diagnostic(
+                code="RUNTIME_RENAME_STATEMENT_INVALID",
+                severity="error",
+                message="RENAME statement has duplicate target variable names.",
+            )
+
+        for source, target in rename_map.items():
+            if target in rename_map and rename_map.get(target) == source:
+                return Diagnostic(
+                    code="RUNTIME_RENAME_STATEMENT_INVALID",
+                    severity="error",
+                    message="RENAME statement contains circular reference.",
+                )
+
+        return None
 
     def _prepare_runtime_inputs(
         self,
@@ -1082,9 +1663,11 @@ class DataStepExecutor:
             prepared_rows.append(enriched)
 
         if by_keys:
-            if any(any(by_key not in row for by_key in by_keys) for row in prepared_rows):
+            if any(any(self._resolve_row_key(row, by_key) is None for by_key in by_keys) for row in prepared_rows):
                 missing_key = next(
-                    by_key for by_key in by_keys if any(by_key not in row for row in prepared_rows)
+                    by_key
+                    for by_key in by_keys
+                    if any(self._resolve_row_key(row, by_key) is None for row in prepared_rows)
                 )
                 return None, Diagnostic(
                     code="RUNTIME_BY_PRECONDITION_FAILED",
@@ -1094,9 +1677,9 @@ class DataStepExecutor:
 
             for by_key in by_keys:
                 for index, row in enumerate(prepared_rows):
-                    previous_value = prepared_rows[index - 1].get(by_key) if index > 0 else object()
-                    next_value = prepared_rows[index + 1].get(by_key) if index < len(prepared_rows) - 1 else object()
-                    current_value = row.get(by_key)
+                    previous_value = self._resolve_row_value(prepared_rows[index - 1], by_key) if index > 0 else object()
+                    next_value = self._resolve_row_value(prepared_rows[index + 1], by_key) if index < len(prepared_rows) - 1 else object()
+                    current_value = self._resolve_row_value(row, by_key)
                     row[f"FIRST.{by_key}"] = 1 if current_value != previous_value else 0
                     row[f"LAST.{by_key}"] = 1 if current_value != next_value else 0
                     row[f"first.{by_key}"] = row[f"FIRST.{by_key}"]
@@ -1143,7 +1726,7 @@ class DataStepExecutor:
 
         processed: list[dict[str, Any]] = []
 
-        if option_spec.rename_map and len(set(option_spec.rename_map.values())) != len(option_spec.rename_map):
+        if option_spec.rename_map and len({_column_key(value) for value in option_spec.rename_map.values()}) != len(option_spec.rename_map):
             return [], Diagnostic(
                 code="RUNTIME_DATASET_OPTION_INVALID",
                 severity="error",
@@ -1154,16 +1737,30 @@ class DataStepExecutor:
             working = dict(row)
 
             if option_spec.keep_vars:
-                keep_set = set(option_spec.keep_vars)
-                working = {name: value for name, value in working.items() if name in keep_set}
+                keep_set = {_column_key(name) for name in option_spec.keep_vars}
+                working = {
+                    name: value
+                    for name, value in working.items()
+                    if _column_key(name) in keep_set
+                }
 
             if option_spec.drop_vars:
-                drop_set = set(option_spec.drop_vars)
-                working = {name: value for name, value in working.items() if name not in drop_set}
+                drop_set = {_column_key(name) for name in option_spec.drop_vars}
+                working = {
+                    name: value
+                    for name, value in working.items()
+                    if _column_key(name) not in drop_set
+                }
 
             if option_spec.where_expr:
                 try:
-                    passes = bool(eval(option_spec.where_expr, {"__builtins__": {}}, dict(working)))
+                    passes = bool(
+                        eval(
+                            option_spec.where_expr,
+                            {"__builtins__": {}},
+                            self._build_case_insensitive_scope(working),
+                        )
+                    )
                 except Exception as error:
                     return [], Diagnostic(
                         code="RUNTIME_DATASET_OPTION_INVALID",
@@ -1176,11 +1773,10 @@ class DataStepExecutor:
                     continue
 
             if option_spec.rename_map:
-                renamed_row: dict[str, Any] = {}
-                for key, value in working.items():
-                    renamed_row[option_spec.rename_map.get(key, key)] = value
-                for old_name in option_spec.rename_map:
-                    if old_name not in working:
+                resolved_rename_map: dict[str, str] = {}
+                for old_name, new_name in option_spec.rename_map.items():
+                    resolved_old_name = self._resolve_row_key(working, old_name)
+                    if resolved_old_name is None:
                         return [], Diagnostic(
                             code="RUNTIME_DATASET_OPTION_INVALID",
                             severity="error",
@@ -1189,6 +1785,10 @@ class DataStepExecutor:
                                 f"for source '{source_name}'."
                             ),
                         )
+                    resolved_rename_map[resolved_old_name] = new_name
+                renamed_row: dict[str, Any] = {}
+                for key, value in working.items():
+                    renamed_row[resolved_rename_map.get(key, key)] = value
                 working = renamed_row
 
             processed.append(working)
@@ -1255,7 +1855,14 @@ class DataStepExecutor:
             if ref.kind == "arrow_table" and isinstance(ref.payload, pa.Table):
                 # Sort in Arrow space – preserves kind so Rust backend is unaffected.
                 table: pa.Table = ref.payload
-                active_keys = [(k, "ascending") for k in by_keys if k in table.column_names]
+                active_keys = []
+                for by_key in by_keys:
+                    resolved_key = next(
+                        (column_name for column_name in table.column_names if _column_key(column_name) == _column_key(by_key)),
+                        None,
+                    )
+                    if resolved_key is not None:
+                        active_keys.append((resolved_key, "ascending"))
                 if not active_keys:
                     sorted_inputs[name] = ref
                     continue
@@ -1271,14 +1878,17 @@ class DataStepExecutor:
                 if error is not None or not rows:
                     sorted_inputs[name] = ref
                     continue
-                active_keys_str = [k for k in by_keys if k in rows[0]]
+                active_keys_str = [k for k in by_keys if self._resolve_row_key(rows[0], k) is not None]
                 if not active_keys_str:
                     sorted_inputs[name] = ref
                     continue
 
                 def _sort_key(row: dict[str, Any], keys: list[str] = active_keys_str) -> tuple:
                     return tuple(
-                        (row.get(k) is None, str(row.get(k)) if row.get(k) is not None else "")
+                        (
+                            self._resolve_row_value(row, k) is None,
+                            str(self._resolve_row_value(row, k)) if self._resolve_row_value(row, k) is not None else "",
+                        )
                         for k in keys
                     )
 
@@ -1331,28 +1941,7 @@ class DataStepExecutor:
 
 
     def _split_data_step_blocks(self, dsl_text: str) -> tuple[str, ...]:
-        segments = [segment.strip() for segment in dsl_text.split(";") if segment.strip()]
-        if not segments:
-            return ()
-
-        blocks: list[str] = []
-        current: list[str] = []
-
-        for segment in segments:
-            lowered = segment.lower()
-            if lowered.startswith("data ") and current:
-                blocks.append("; ".join(current) + ";")
-                current = []
-
-            current.append(segment)
-            if lowered == "run" or lowered.startswith("run "):
-                blocks.append("; ".join(current) + ";")
-                current = []
-
-        if current:
-            blocks.append("; ".join(current) + ";")
-
-        return tuple(blocks)
+        return self._block_splitter.split(dsl_text)
 
     def _with_block_location(
         self,
@@ -1376,6 +1965,10 @@ class DataStepExecutor:
                     message=diagnostic.message,
                     location=location,
                     stage=diagnostic.stage,
+                    span=diagnostic.span,
+                    labels=diagnostic.labels,
+                    notes=diagnostic.notes,
+                    source_text=diagnostic.source_text,
                 )
             )
         return tuple(updated)

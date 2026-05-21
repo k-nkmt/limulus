@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
+from ._naming import _dataset_key
 from .io_adapters import DataFrameAdapterPandas, DataInputAdapterArrow, DataOutputAdapterArrow, InputSpec, OutputSpec
 from .models import DataSetRef, Diagnostic, ExecuteResponse, OutputConversionResult
 
@@ -418,7 +419,7 @@ class ExecutorIOService:
         return normalized
 
     def dataset_name_key(self, name: str) -> str:
-        return self.normalize_dataset_name(name).lower()
+        return _dataset_key(name)
 
     def resolve_dataset_alias(
         self,

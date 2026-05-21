@@ -1,0 +1,36 @@
+start: do_stmt
+
+do_stmt: DO LOOP_VAR EQUALS expression TO expression
+expression: expression_atom+
+
+?expression_atom: STRING
+                | NAME
+                | NUMBER
+                | OP
+                | COMMA
+                | DOT
+                | COLON
+                | LPAR expression? RPAR
+                | LBRACK expression? RBRACK
+                | LBRACE expression? RBRACE
+
+DO.5: /[dD][oO]/
+TO.5: /[tT][oO]/
+LOOP_VAR.4: /[A-Za-z_][\w\.]*/
+NAME.1: /[A-Za-z_][\w\.]*/
+EQUALS: "="
+NUMBER: /(?:\d+\.\d*|\d+|\.\d+)(?:[eE][+-]?\d+)?/
+STRING: /'(?:''|[^'])*'|"(?:""|[^"])*"/
+OP: />=|<=|!=|==|\^=|~=|¬=|\|\||\*\*|[-+*\/%^<>=]/
+COMMA: ","
+DOT: "."
+COLON: ":"
+LPAR: "("
+RPAR: ")"
+LBRACK: "["
+RBRACK: "]"
+LBRACE: "{"
+RBRACE: "}"
+
+%import common.WS_INLINE
+%ignore WS_INLINE

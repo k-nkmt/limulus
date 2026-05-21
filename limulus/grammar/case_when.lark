@@ -1,0 +1,40 @@
+?start: case_expr
+
+case_expr: CASE when_clause+ else_clause? END
+when_clause: WHEN expression THEN expression
+else_clause: ELSE expression
+
+expression: expression_atom+
+
+?expression_atom: STRING
+                | NAME
+                | NUMBER
+                | OP
+                | COMMA
+                | DOT
+                | COLON
+                | LPAR expression? RPAR
+                | LBRACK expression? RBRACK
+                | LBRACE expression? RBRACE
+
+CASE.5: /[cC][aA][sS][eE]/
+WHEN.5: /[wW][hH][eE][nN]/
+THEN.5: /[tT][hH][eE][nN]/
+ELSE.5: /[eE][lL][sS][eE]/
+END.5: /[eE][nN][dD]/
+NAME.1: /[A-Za-z_][\w\.]*/
+NUMBER: /(?:\d+\.\d*|\d+|\.\d+)(?:[eE][+-]?\d+)?/
+STRING: /'(?:''|[^'])*'|"(?:""|[^"])*"/
+OP: />=|<=|!=|==|\^=|~=|¬=|\|\||\*\*|[-+*\/%^<>=]/
+COMMA: ","
+DOT: "."
+COLON: ":"
+LPAR: "("
+RPAR: ")"
+LBRACK: "["
+RBRACK: "]"
+LBRACE: "{"
+RBRACE: "}"
+
+%import common.WS_INLINE
+%ignore WS_INLINE

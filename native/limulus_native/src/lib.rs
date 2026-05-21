@@ -1,6 +1,5 @@
-use chrono::{Datelike, NaiveDate};
-use chumsky::prelude::*;
-use chumsky::error::Simple;
+use ariadne::{Label, Report, ReportKind, Source};
+use chrono::{Datelike, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 use std::collections::{HashMap, HashSet};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -25,6 +24,10 @@ struct AstStatement {
     rename_map: HashMap<String, String>,
     #[serde(default)]
     if_spec: Option<AstIfSpec>,
+    #[serde(default)]
+    do_spec: Option<AstDoSpec>,
+    #[serde(default)]
+    array_spec: Option<AstArraySpec>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -33,6 +36,23 @@ struct AstIfSpec {
     then_action: Option<String>,
     is_subset: bool,
     is_then_do: bool,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct AstDoSpec {
+    loop_var: String,
+    start_expr: String,
+    end_expr: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct AstArraySpec {
+    array_name: String,
+    #[serde(default)]
+    variables: Vec<String>,
+    declared_size: Option<usize>,
+    wildcard_size: bool,
+    character_array: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -58,6 +78,44 @@ struct AstDatasetRefOptions {
 struct AstStatementOptions {
     indsname_var: Option<String>,
     end_var: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct RenderPayload {
+    source_id: String,
+    source_text: Option<String>,
+    diagnostics: Vec<RenderDiagnostic>,
+}
+
+#[derive(Debug, Clone)]
+struct RenderDiagnostic {
+    code: String,
+    severity: String,
+    message: String,
+    location: String,
+    stage: String,
+    span: Option<RenderSpan>,
+    labels: Vec<RenderLabel>,
+    notes: Vec<String>,
+    source_text: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct RenderLabel {
+    span: Option<RenderSpan>,
+    message: String,
+    kind: String,
+}
+
+#[derive(Debug, Clone)]
+struct RenderSpan {
+    start: usize,
+    end: usize,
+    line: usize,
+    column: usize,
+    end_line: Option<usize>,
+    end_column: Option<usize>,
+    source_id: String,
 }
 
 #[derive(Debug, Clone)]
@@ -105,6 +163,8 @@ enum ScalarValue {
     Text(String),
     Bool(bool),
     Date(NaiveDate),
+    DateTime(NaiveDateTime),
+    Time(NaiveTime),
     Null,
 }
 
@@ -182,18 +242,6 @@ fn diag(py: Python<'_>, code: &str, location: &str, message: &str) -> PyResult<P
     Ok(item.unbind())
 }
 
-fn extract_statement_kinds(statements: &Bound<'_, PyList>) -> PyResult<Vec<String>> {
-    let mut kinds = Vec::new();
-    for statement in statements.iter() {
-        let statement_dict = statement.downcast::<PyDict>()?;
-        let kind_item = statement_dict
-            .get_item("kind")?
-            .ok_or_else(|| PyValueError::new_err("statement.kind is required"))?;
-        kinds.push(kind_item.extract::<String>()?);
-    }
-    Ok(kinds)
-}
-
 fn statement_body(text: &str, keyword: &str) -> String {
     let lowered = text.to_lowercase();
     if lowered.starts_with(&format!("{} ", keyword)) {
@@ -205,167 +253,304 @@ fn statement_body(text: &str, keyword: &str) -> String {
     text.to_string()
 }
 
-fn split_top_level_tokens(text: &str) -> Vec<String> {
-    let mut tokens: Vec<String> = Vec::new();
-    let mut current = String::new();
-    let mut depth = 0i32;
-
-    for ch in text.chars() {
-        if ch == '(' {
-            depth += 1;
-            current.push(ch);
-            continue;
-        }
-        if ch == ')' {
-            depth -= 1;
-            current.push(ch);
-            continue;
-        }
-        if ch.is_whitespace() && depth == 0 {
-            if !current.trim().is_empty() {
-                tokens.push(current.trim().to_string());
-                current.clear();
-            }
-            continue;
-        }
-        current.push(ch);
-    }
-
-    if !current.trim().is_empty() {
-        tokens.push(current.trim().to_string());
-    }
-
-    tokens
+fn column_key(name: &str) -> String {
+    name.trim().to_uppercase()
 }
 
-fn parse_rename_pairs(body: &str) -> HashMap<String, String> {
-    let mut rename_map = HashMap::new();
-    for token in split_top_level_tokens(body) {
-        if let Some((old_name, new_name)) = token.split_once('=') {
-            let old_trimmed = old_name.trim();
-            let new_trimmed = new_name.trim();
-            if !old_trimmed.is_empty() && !new_trimmed.is_empty() {
-                rename_map.insert(old_trimmed.to_string(), new_trimmed.to_string());
-            }
+fn resolve_row_key(row: &Bound<'_, PyDict>, name: &str) -> Result<Option<String>, String> {
+    if row
+        .get_item(name)
+        .map_err(|error| format!("row lookup failed: {error}"))?
+        .is_some()
+    {
+        return Ok(Some(name.to_string()));
+    }
+
+    let normalized = column_key(name);
+    for (key_any, _) in row.iter() {
+        let candidate = key_any
+            .extract::<String>()
+            .map_err(|error| format!("row key extract failed: {error}"))?;
+        if column_key(&candidate) == normalized {
+            return Ok(Some(candidate));
         }
     }
-    rename_map
+
+    Ok(None)
 }
 
-fn parse_dataset_option_body(option_body: &str) -> AstDatasetRefOptions {
-    let mut in_var: Option<String> = None;
-    let mut keep_vars: Vec<String> = Vec::new();
-    let mut drop_vars: Vec<String> = Vec::new();
-    let mut where_expr: Option<String> = None;
-    let mut rename_map: HashMap<String, String> = HashMap::new();
-    let mut active_collect: Option<String> = None;
+fn get_row_item<'py>(row: &Bound<'py, PyDict>, name: &str) -> Result<Option<Bound<'py, PyAny>>, String> {
+    if let Some(value) = row
+        .get_item(name)
+        .map_err(|error| format!("row get_item failed: {error}"))?
+    {
+        return Ok(Some(value));
+    }
 
-    for token in split_top_level_tokens(option_body) {
-        if let Some((key, value)) = token.split_once('=') {
-            let normalized_key = key.trim().to_lowercase();
-            let raw_value = value.trim();
-            if normalized_key == "in" {
-                in_var = Some(raw_value.to_string());
-                active_collect = None;
-                continue;
-            }
-            if normalized_key == "keep" {
-                keep_vars = raw_value
-                    .split_whitespace()
-                    .filter(|item| !item.is_empty())
-                    .map(|item| item.to_string())
-                    .collect();
-                active_collect = Some("keep".to_string());
-                continue;
-            }
-            if normalized_key == "drop" {
-                drop_vars = raw_value
-                    .split_whitespace()
-                    .filter(|item| !item.is_empty())
-                    .map(|item| item.to_string())
-                    .collect();
-                active_collect = Some("drop".to_string());
-                continue;
-            }
-            if normalized_key == "where" {
-                if raw_value.starts_with('(') && raw_value.ends_with(')') && raw_value.len() >= 2 {
-                    where_expr = Some(raw_value[1..raw_value.len() - 1].trim().to_string());
-                } else {
-                    where_expr = Some(raw_value.to_string());
-                }
-                active_collect = None;
-                continue;
-            }
-            if normalized_key == "rename" {
-                let rename_body = if raw_value.starts_with('(') && raw_value.ends_with(')') && raw_value.len() >= 2 {
-                    &raw_value[1..raw_value.len() - 1]
-                } else {
-                    raw_value
-                };
-                rename_map = parse_rename_pairs(rename_body);
-                active_collect = None;
-                continue;
-            }
-            active_collect = None;
+    let Some(resolved_name) = resolve_row_key(row, name)? else {
+        return Ok(None);
+    };
+
+    row.get_item(&resolved_name)
+        .map_err(|error| format!("row get_item failed: {error}"))
+}
+
+fn delete_row_item(row: &Bound<'_, PyDict>, name: &str) -> Result<(), String> {
+    if let Some(resolved_name) = resolve_row_key(row, name)? {
+        row.del_item(&resolved_name)
+            .map_err(|error| format!("row del_item failed: {error}"))?;
+    }
+    Ok(())
+}
+
+fn build_case_insensitive_scope<'py>(py: Python<'py>, row: &Bound<'py, PyDict>) -> Result<Bound<'py, PyDict>, String> {
+    let locals = PyDict::new(py);
+    for (key, value) in row.iter() {
+        locals
+            .set_item(&key, &value)
+            .map_err(|error| format!("case-insensitive scope set failed: {error}"))?;
+
+        let Ok(name) = key.extract::<String>() else {
             continue;
+        };
+
+        let normalized = column_key(&name);
+        if locals
+            .get_item(&normalized)
+            .map_err(|error| format!("case-insensitive scope get failed: {error}"))?
+            .is_none()
+        {
+            locals
+                .set_item(&normalized, &value)
+                .map_err(|error| format!("case-insensitive scope normalized set failed: {error}"))?;
         }
 
-        if let Some(active) = &active_collect {
-            if active == "keep" {
-                keep_vars.push(token.clone());
-            } else if active == "drop" {
-                drop_vars.push(token.clone());
-            }
+        let lowered = name.to_lowercase();
+        if locals
+            .get_item(&lowered)
+            .map_err(|error| format!("case-insensitive scope get failed: {error}"))?
+            .is_none()
+        {
+            locals
+                .set_item(&lowered, &value)
+                .map_err(|error| format!("case-insensitive scope lowered set failed: {error}"))?;
+        }
+    }
+    Ok(locals)
+}
+
+fn extract_render_payload(payload: &Bound<'_, PyDict>) -> PyResult<RenderPayload> {
+    let source_id = py_dict_string(payload, "source_id", "<dsl>")?;
+    let source_text = py_dict_optional_string(payload, "source_text")?;
+    let diagnostics_any = payload
+        .get_item("diagnostics")?
+        .ok_or_else(|| PyValueError::new_err("payload.diagnostics is required"))?;
+    let diagnostics_list = diagnostics_any.downcast::<PyList>()?;
+    let mut diagnostics: Vec<RenderDiagnostic> = Vec::new();
+    for item in diagnostics_list.iter() {
+        let diagnostic_dict = item.downcast::<PyDict>()?;
+        diagnostics.push(extract_render_diagnostic(&diagnostic_dict)?);
+    }
+    Ok(RenderPayload {
+        source_id,
+        source_text,
+        diagnostics,
+    })
+}
+
+fn extract_render_diagnostic(payload: &Bound<'_, PyDict>) -> PyResult<RenderDiagnostic> {
+    let labels_any = payload.get_item("labels")?;
+    let mut labels: Vec<RenderLabel> = Vec::new();
+    if let Some(labels_value) = labels_any {
+        let labels_list = labels_value.downcast::<PyList>()?;
+        for item in labels_list.iter() {
+            let label_dict = item.downcast::<PyDict>()?;
+            labels.push(extract_render_label(&label_dict)?);
         }
     }
 
-    AstDatasetRefOptions {
-        in_var,
-        keep_vars,
-        drop_vars,
-        where_expr,
-        rename_map,
+    let notes_any = payload.get_item("notes")?;
+    let mut notes: Vec<String> = Vec::new();
+    if let Some(notes_value) = notes_any {
+        let notes_list = notes_value.downcast::<PyList>()?;
+        for item in notes_list.iter() {
+            notes.push(item.extract::<String>()?);
+        }
+    }
+
+    Ok(RenderDiagnostic {
+        code: py_dict_string(payload, "code", "UNKNOWN")?,
+        severity: py_dict_string(payload, "severity", "error")?,
+        message: py_dict_string(payload, "message", "")?,
+        location: py_dict_string(payload, "location", "")?,
+        stage: py_dict_string(payload, "stage", "")?,
+        span: extract_optional_render_span(payload.get_item("span")?)?,
+        labels,
+        notes,
+        source_text: py_dict_optional_string(payload, "source_text")?,
+    })
+}
+
+fn extract_render_label(payload: &Bound<'_, PyDict>) -> PyResult<RenderLabel> {
+    Ok(RenderLabel {
+        span: extract_optional_render_span(payload.get_item("span")?)?,
+        message: py_dict_string(payload, "message", "")?,
+        kind: py_dict_string(payload, "kind", "primary")?,
+    })
+}
+
+fn extract_optional_render_span(value: Option<Bound<'_, PyAny>>) -> PyResult<Option<RenderSpan>> {
+    let Some(span_value) = value else {
+        return Ok(None);
+    };
+    if span_value.is_none() {
+        return Ok(None);
+    }
+    let span_dict = span_value.downcast::<PyDict>()?;
+    Ok(Some(RenderSpan {
+        start: py_dict_usize(&span_dict, "start", 0)?,
+        end: py_dict_usize(&span_dict, "end", 1)?,
+        line: py_dict_usize(&span_dict, "line", 1)?,
+        column: py_dict_usize(&span_dict, "column", 1)?,
+        end_line: py_dict_optional_usize(&span_dict, "end_line")?,
+        end_column: py_dict_optional_usize(&span_dict, "end_column")?,
+        source_id: py_dict_string(&span_dict, "source_id", "<dsl>")?,
+    }))
+}
+
+fn py_dict_string(payload: &Bound<'_, PyDict>, key: &str, default: &str) -> PyResult<String> {
+    let Some(value) = payload.get_item(key)? else {
+        return Ok(default.to_string());
+    };
+    if value.is_none() {
+        return Ok(default.to_string());
+    }
+    value.extract::<String>()
+}
+
+fn py_dict_optional_string(payload: &Bound<'_, PyDict>, key: &str) -> PyResult<Option<String>> {
+    let Some(value) = payload.get_item(key)? else {
+        return Ok(None);
+    };
+    if value.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(value.extract::<String>()?))
+}
+
+fn py_dict_usize(payload: &Bound<'_, PyDict>, key: &str, default: usize) -> PyResult<usize> {
+    let Some(value) = payload.get_item(key)? else {
+        return Ok(default);
+    };
+    if value.is_none() {
+        return Ok(default);
+    }
+    value.extract::<usize>()
+}
+
+fn py_dict_optional_usize(payload: &Bound<'_, PyDict>, key: &str) -> PyResult<Option<usize>> {
+    let Some(value) = payload.get_item(key)? else {
+        return Ok(None);
+    };
+    if value.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(value.extract::<usize>()?))
+}
+
+fn normalize_render_range(span: &RenderSpan, source_text: &str) -> std::ops::Range<usize> {
+    let start = span.start.min(source_text.len());
+    let end = span.end.max(start + 1).min(source_text.len().max(start + 1));
+    start..end
+}
+
+fn render_report_kind(severity: &str) -> ReportKind<'static> {
+    match severity.to_lowercase().as_str() {
+        "warning" => ReportKind::Warning,
+        "info" | "note" => ReportKind::Advice,
+        _ => ReportKind::Error,
     }
 }
 
-fn parse_dataset_refs_from_statement(text: &str, keyword: &str) -> Vec<AstDatasetRef> {
-    let body = statement_body(text, keyword);
-    if body.is_empty() {
-        return Vec::new();
+fn render_header_message(diagnostic: &RenderDiagnostic) -> String {
+    if diagnostic.stage.is_empty() {
+        diagnostic.message.clone()
+    } else {
+        format!("[stage: {}] {}", diagnostic.stage, diagnostic.message)
     }
+}
 
-    let mut refs: Vec<AstDatasetRef> = Vec::new();
-    for token in split_top_level_tokens(&body) {
-        let candidate = token.trim().trim_end_matches(';').trim();
-        if candidate.is_empty() {
+fn render_simple_diagnostic(diagnostic: &RenderDiagnostic) -> String {
+    let mut header = format!("{}[{}]", diagnostic.severity.to_lowercase(), diagnostic.code);
+    if !diagnostic.stage.is_empty() {
+        header.push_str(&format!(" [stage: {}]", diagnostic.stage));
+    }
+    header.push_str(&format!(": {}", diagnostic.message));
+    if !diagnostic.location.is_empty() {
+        header.push_str(&format!(" ({})", diagnostic.location));
+    }
+    let mut lines = vec![header];
+    for note in &diagnostic.notes {
+        lines.push(format!("note: {}", note));
+    }
+    lines.join("\n")
+}
+
+fn render_ariadne_diagnostic(diagnostic: &RenderDiagnostic, payload: &RenderPayload) -> Result<String, String> {
+    let source_text = diagnostic
+        .source_text
+        .as_deref()
+        .or(payload.source_text.as_deref());
+    let span = diagnostic.span.as_ref();
+    let Some(source_text) = source_text else {
+        return Ok(render_simple_diagnostic(diagnostic));
+    };
+    let Some(span) = span else {
+        return Ok(render_simple_diagnostic(diagnostic));
+    };
+
+    let source_id = if span.source_id.is_empty() {
+        payload.source_id.clone()
+    } else {
+        span.source_id.clone()
+    };
+    let report_range = normalize_render_range(span, source_text);
+    let mut builder = Report::build(
+        render_report_kind(&diagnostic.severity),
+        (source_id.clone(), report_range.clone()),
+    )
+        .with_code(diagnostic.code.clone())
+        .with_message(render_header_message(diagnostic));
+
+    let mut has_label = false;
+    for label in &diagnostic.labels {
+        let Some(label_span) = label.span.as_ref() else {
             continue;
+        };
+        let range = normalize_render_range(label_span, source_text);
+        let mut ariadne_label = Label::new((source_id.clone(), range));
+        if !label.message.is_empty() {
+            ariadne_label = ariadne_label.with_message(label.message.clone());
         }
-
-        if !candidate.contains('(') && candidate.contains('=') {
-            break;
-        }
-
-        if let Some(open_index) = candidate.find('(') {
-            if candidate.ends_with(')') {
-                let name = candidate[..open_index].trim();
-                let option_body = &candidate[open_index + 1..candidate.len() - 1];
-                if !name.is_empty() {
-                    refs.push(AstDatasetRef {
-                        name: name.to_string(),
-                        options: parse_dataset_option_body(option_body),
-                    });
-                    continue;
-                }
-            }
-        }
-
-        refs.push(AstDatasetRef {
-            name: candidate.to_string(),
-            options: AstDatasetRefOptions::default(),
-        });
+        builder = builder.with_label(ariadne_label);
+        has_label = true;
     }
 
-    refs
+    if !has_label {
+        let range = normalize_render_range(span, source_text);
+        builder = builder.with_label(Label::new((source_id.clone(), range)));
+    }
+
+    for note in &diagnostic.notes {
+        builder = builder.with_note(note.clone());
+    }
+
+    let report = builder.finish();
+    let mut buffer: Vec<u8> = Vec::new();
+    if let Err(error) = report.write((source_id, Source::from(source_text)), &mut buffer) {
+        return Err(error.to_string());
+    }
+    String::from_utf8(buffer).map_err(|error| error.to_string())
 }
 
 fn parse_assignment(text: &str) -> Option<(String, String)> {
@@ -376,32 +561,6 @@ fn parse_assignment(text: &str) -> Option<(String, String)> {
         return None;
     }
     Some((name.to_string(), expr.to_string()))
-}
-
-fn parse_array_declaration(text: &str) -> Option<(String, Vec<String>)> {
-    let body = statement_body(text, "array");
-    if body.is_empty() {
-        return None;
-    }
-    let mut tokens: Vec<String> = body.split_whitespace().map(|item| item.to_string()).collect();
-    if tokens.len() < 2 {
-        return None;
-    }
-    let array_name = tokens.remove(0);
-    if tokens.first().map(|item| item.as_str()) == Some("$") {
-        tokens.remove(0);
-    }
-    if let Some(first) = tokens.first() {
-        let is_dim_token = first.starts_with('[') && first.ends_with(']');
-        let is_numeric_dim = first.chars().all(|ch| ch.is_ascii_digit());
-        if is_dim_token || is_numeric_dim {
-            tokens.remove(0);
-        }
-    }
-    if tokens.is_empty() {
-        return None;
-    }
-    Some((array_name, tokens))
 }
 
 fn parse_array_reference_token(token: &str) -> Option<(String, String)> {
@@ -471,93 +630,65 @@ fn parse_sum_statement_cached(text: &str, state: &mut EvalRuntimeState) -> Optio
     parsed
 }
 
-fn parse_if_then_action(text: &str, keyword: &str) -> Option<(String, String)> {
-    let lowered = text.to_lowercase();
-    let prefix = format!("{} ", keyword);
-    if !lowered.starts_with(&prefix) {
-        return None;
-    }
-    let body = text[prefix.len()..].trim();
-    let body_lower = body.to_lowercase();
-    let then_index = body_lower.find(" then ")?;
-    let condition = body[..then_index].trim();
-    let action = body[then_index + 6..].trim();
-    if condition.is_empty() || action.is_empty() {
-        return None;
-    }
-    Some((condition.to_string(), action.to_string()))
-}
-
-fn parse_subset_if_condition(text: &str, keyword: &str) -> Option<String> {
-    let lowered = text.to_lowercase();
-    let prefix = format!("{} ", keyword);
-    if !lowered.starts_with(&prefix) {
-        return None;
-    }
-    let body = text[prefix.len()..].trim();
-    if body.is_empty() || body.to_lowercase().contains(" then ") {
-        return None;
-    }
-    Some(body.to_string())
-}
-
-fn is_if_then_do(text: &str) -> bool {
-    text.to_lowercase().contains(" then do")
-}
-
 fn statement_if_then_do(statement: &AstStatement) -> bool {
-    if let Some(spec) = &statement.if_spec {
-        if spec.is_then_do {
-            return true;
-        }
-    }
-    is_if_then_do(&statement.text)
+    statement.if_spec.as_ref().map(|spec| spec.is_then_do).unwrap_or(false)
 }
 
-fn statement_if_then_action(statement: &AstStatement, keyword: &str) -> Option<(String, String)> {
-    if let Some(spec) = &statement.if_spec {
-        if let Some(action) = &spec.then_action {
-            let condition = spec.condition.trim();
-            let action_trimmed = action.trim();
-            if !condition.is_empty() && !action_trimmed.is_empty() {
-                return Some((condition.to_string(), action_trimmed.to_string()));
-            }
-        }
+fn statement_if_then_action(statement: &AstStatement) -> Option<(String, String)> {
+    let spec = statement.if_spec.as_ref()?;
+    let action = spec.then_action.as_ref()?;
+    let condition = spec.condition.trim();
+    let action_trimmed = action.trim();
+    if condition.is_empty() || action_trimmed.is_empty() || spec.is_subset || spec.is_then_do {
+        return None;
     }
-    parse_if_then_action(&statement.text, keyword)
+    Some((condition.to_string(), action_trimmed.to_string()))
 }
 
-fn statement_subset_if_condition(statement: &AstStatement, keyword: &str) -> Option<String> {
-    if let Some(spec) = &statement.if_spec {
-        if spec.is_subset {
-            let condition = spec.condition.trim();
-            if !condition.is_empty() {
-                return Some(condition.to_string());
-            }
-        }
+fn statement_subset_if_condition(statement: &AstStatement) -> Option<String> {
+    let spec = statement.if_spec.as_ref()?;
+    if !spec.is_subset {
+        return None;
     }
-    parse_subset_if_condition(&statement.text, keyword)
+    let condition = spec.condition.trim();
+    if condition.is_empty() {
+        return None;
+    }
+    Some(condition.to_string())
 }
 
-fn parse_do_to_spec(text: &str) -> Option<(String, String, String)> {
-    let lowered = text.to_lowercase();
-    if !lowered.starts_with("do ") {
+fn statement_do_spec(statement: &AstStatement) -> Option<(String, String, String)> {
+    let spec = statement.do_spec.as_ref()?;
+    let loop_var = spec.loop_var.trim();
+    let start_expr = spec.start_expr.trim();
+    let end_expr = spec.end_expr.trim();
+    if loop_var.is_empty() || start_expr.is_empty() || end_expr.is_empty() {
         return None;
     }
-    let body = text[3..].trim();
-    let (left, right) = body.split_once('=')?;
-    let var_name = left.trim().to_string();
-    if var_name.is_empty() {
+    Some((
+        loop_var.to_string(),
+        start_expr.to_string(),
+        end_expr.to_string(),
+    ))
+}
+
+fn statement_array_spec(statement: &AstStatement) -> Option<(String, Vec<String>)> {
+    let spec = statement.array_spec.as_ref()?;
+    let array_name = spec.array_name.trim();
+    if array_name.is_empty() {
         return None;
     }
-    let right_lower = right.to_lowercase();
-    let to_index = right_lower.find(" to ")?;
-    let from_expr = right[..to_index].trim();
-    let to_expr = right[to_index + 4..].trim();
-    if from_expr.is_empty() || to_expr.is_empty() {
+    let variables: Vec<String> = spec
+        .variables
+        .iter()
+        .map(|item| item.trim())
+        .filter(|item| !item.is_empty())
+        .map(|item| item.to_string())
+        .collect();
+    if variables.is_empty() {
         return None;
     }
-    Some((var_name, from_expr.to_string(), to_expr.to_string()))
+    Some((array_name.to_string(), variables))
 }
 
 fn find_matching_end(statements: &[AstStatement], start: usize, stop: usize) -> Option<usize> {
@@ -579,14 +710,76 @@ fn find_matching_end(statements: &[AstStatement], start: usize, stop: usize) -> 
 }
 
 fn set_row_scalar(row: &Bound<'_, PyDict>, name: &str, value: &ScalarValue) -> Result<(), String> {
+    let normalized = column_key(name);
+    let mut target_name: Option<String> = None;
+    let mut duplicate_names: Vec<String> = Vec::new();
+    for (key_any, _) in row.iter() {
+        let candidate = key_any
+            .extract::<String>()
+            .map_err(|error| format!("set_item key extract failed: {error}"))?;
+        if column_key(&candidate) != normalized {
+            continue;
+        }
+        if target_name.is_none() {
+            target_name = Some(candidate.clone());
+        } else {
+            duplicate_names.push(candidate);
+        }
+    }
+    let target_name = target_name.unwrap_or_else(|| name.to_string());
+    for duplicate_name in duplicate_names {
+        row.del_item(&duplicate_name).ok();
+    }
     match value {
-        ScalarValue::Number(number) => row.set_item(name, *number),
-        ScalarValue::Text(text) => row.set_item(name, text.clone()),
-        ScalarValue::Bool(boolean) => row.set_item(name, *boolean),
-        ScalarValue::Date(date) => row.set_item(name, date.to_string()),
-        ScalarValue::Null => row.set_item(name, py_none(row.py())),
+        ScalarValue::Number(number) => row.set_item(&target_name, *number),
+        ScalarValue::Text(text) => row.set_item(&target_name, text.clone()),
+        ScalarValue::Bool(boolean) => row.set_item(&target_name, *boolean),
+        ScalarValue::Date(date) => row.set_item(&target_name, temporal_scalar_to_pyany(row.py(), &ScalarValue::Date(*date))?),
+        ScalarValue::DateTime(datetime) => {
+            row.set_item(&target_name, temporal_scalar_to_pyany(row.py(), &ScalarValue::DateTime(*datetime))?)
+        }
+        ScalarValue::Time(time) => row.set_item(&target_name, temporal_scalar_to_pyany(row.py(), &ScalarValue::Time(*time))?),
+        ScalarValue::Null => row.set_item(&target_name, py_none(row.py())),
     }
     .map_err(|error| format!("set_item failed: {error}"))
+}
+
+fn temporal_scalar_to_pyany(py: Python<'_>, value: &ScalarValue) -> Result<Py<PyAny>, String> {
+    let datetime_module = py.import("datetime").map_err(|error| error.to_string())?;
+    match value {
+        ScalarValue::Date(date) => datetime_module
+            .getattr("date")
+            .map_err(|error| error.to_string())?
+            .call1((date.year(), date.month(), date.day()))
+            .map_err(|error| error.to_string())
+            .map(|item| item.unbind()),
+        ScalarValue::DateTime(datetime) => datetime_module
+            .getattr("datetime")
+            .map_err(|error| error.to_string())?
+            .call1((
+                datetime.year(),
+                datetime.month(),
+                datetime.day(),
+                datetime.hour(),
+                datetime.minute(),
+                datetime.second(),
+                datetime.and_utc().timestamp_subsec_micros(),
+            ))
+            .map_err(|error| error.to_string())
+            .map(|item| item.unbind()),
+        ScalarValue::Time(time) => datetime_module
+            .getattr("time")
+            .map_err(|error| error.to_string())?
+            .call1((
+                time.hour(),
+                time.minute(),
+                time.second(),
+                time.nanosecond() / 1_000,
+            ))
+            .map_err(|error| error.to_string())
+            .map(|item| item.unbind()),
+        _ => Err("temporal scalar expected".to_string()),
+    }
 }
 
 fn py_none(py: Python<'_>) -> Py<PyAny> {
@@ -637,12 +830,7 @@ fn evaluate_scalar_expression(
                 .set_item("__builtins__", PyDict::new(py))
                 .map_err(|error| format!("python pow fallback globals failed: {error}"))?;
 
-            let locals = PyDict::new(py);
-            for (key, value) in row.iter() {
-                locals
-                    .set_item(key, value)
-                    .map_err(|error| format!("python pow fallback row bind failed: {error}"))?;
-            }
+            let locals = build_case_insensitive_scope(py, row)?;
 
             let builtins = py
                 .import("builtins")
@@ -683,10 +871,7 @@ fn append_projected_row_to_target(
         }
     } else {
         for name in keep_vars {
-            if let Some(value) = row
-                .get_item(name)
-                .map_err(|error| format!("projection get_item failed: {error}"))?
-            {
+            if let Some(value) = get_row_item(row, name)? {
                 projected
                     .set_item(name, value)
                     .map_err(|error| format!("projection keep set_item failed: {error}"))?;
@@ -696,7 +881,7 @@ fn append_projected_row_to_target(
 
     if !drop_vars.is_empty() {
         for name in drop_vars {
-            projected.del_item(name).ok();
+            delete_row_item(&projected, name).ok();
         }
     }
 
@@ -727,6 +912,13 @@ fn has_inline_output_action(statement: &AstStatement) -> bool {
         return true;
     }
     if statement.kind == "IF" || statement.kind == "ELSE IF" || statement.kind == "ELSE" {
+        if let Some(spec) = &statement.if_spec {
+            if let Some(action) = &spec.then_action {
+                if action.trim().to_lowercase().starts_with("output") {
+                    return true;
+                }
+            }
+        }
         return statement.text.to_lowercase().contains(" output");
     }
     false
@@ -767,7 +959,7 @@ fn execute_inline_action(
     if let Some((name, expr)) = parse_sum_statement_cached(normalized, state) {
         let increment = scalar_to_number(&evaluate_scalar_expression(row, &expr, state)?)?;
 
-        let base = if let Some(existing) = row.get_item(&name).map_err(|e| e.to_string())? {
+        let base = if let Some(existing) = get_row_item(row, &name)? {
             py_to_scalar(&existing).ok()
                 .and_then(|s| scalar_to_number(&s).ok())
                 .unwrap_or(0.0)
@@ -776,8 +968,7 @@ fn execute_inline_action(
         };
         let total = base + increment;
         state.sum_totals.insert(name.clone(), total);
-        row.set_item(&name, total)
-            .map_err(|error| format!("sum assignment failed: {error}"))?;
+        set_row_scalar(row, &name, &ScalarValue::Number(total))?;
         return Ok(());
     }
 
@@ -812,7 +1003,7 @@ fn execute_statement_block(
         match statement.kind.as_str() {
             "END" => return Ok((cursor + 1, outcome)),
             "ARRAY" => {
-                let (name, variables) = parse_array_declaration(&statement.text)
+                let (name, variables) = statement_array_spec(statement)
                     .ok_or_else(|| format!("invalid ARRAY declaration: {}", statement.text))?;
                 state.array_defs.insert(name, variables);
                 cursor += 1;
@@ -825,7 +1016,7 @@ fn execute_statement_block(
                     .ok_or_else(|| format!("invalid SUM statement: {}", statement.text))?;
                 let increment = scalar_to_number(&evaluate_scalar_expression(row, &expr, state)?)?;
 
-                let base = if let Some(existing) = row.get_item(&name).map_err(|e| e.to_string())? {
+                let base = if let Some(existing) = get_row_item(row, &name)? {
                     py_to_scalar(&existing).ok()
                         .and_then(|s| scalar_to_number(&s).ok())
                         .unwrap_or(0.0)
@@ -834,8 +1025,7 @@ fn execute_statement_block(
                 };
                 let total = base + increment;
                 state.sum_totals.insert(name.clone(), total);
-                row.set_item(&name, total)
-                    .map_err(|error| format!("sum set_item failed: {error}"))?;
+                set_row_scalar(row, &name, &ScalarValue::Number(total))?;
                 cursor += 1;
             }
             "ASSIGN" => {
@@ -868,7 +1058,7 @@ fn execute_statement_block(
             "DO" => {
                 let end_index = find_matching_end(statements, cursor, stop)
                     .ok_or_else(|| "DO statement missing matching END".to_string())?;
-                let (var_name, from_expr, to_expr) = parse_do_to_spec(&statement.text)
+                let (var_name, from_expr, to_expr) = statement_do_spec(statement)
                     .ok_or_else(|| format!("unsupported DO statement: {}", statement.text))?;
                 let from_number = scalar_to_number(&evaluate_scalar_expression(row, &from_expr, state)?)?;
                 let to_number = scalar_to_number(&evaluate_scalar_expression(row, &to_expr, state)?)?;
@@ -876,8 +1066,7 @@ fn execute_statement_block(
                 let to_value = to_number as i64;
                 let mut iteration = from_value;
                 while iteration <= to_value {
-                    row.set_item(&var_name, iteration)
-                        .map_err(|error| format!("DO loop var set_item failed: {error}"))?;
+                    set_row_scalar(row, &var_name, &ScalarValue::Number(iteration as f64))?;
                     let (_, nested) = execute_statement_block(py, statements, cursor + 1, end_index, row, state)?;
                     if nested.deleted {
                         outcome.deleted = true;
@@ -894,7 +1083,11 @@ fn execute_statement_block(
             }
             "IF" => {
                 if statement_if_then_do(statement) {
-                    let (condition, _action) = statement_if_then_action(statement, "if")
+                    let condition = statement
+                        .if_spec
+                        .as_ref()
+                        .map(|spec| spec.condition.trim().to_string())
+                        .filter(|condition| !condition.is_empty())
                         .ok_or_else(|| format!("invalid IF THEN DO statement: {}", statement.text))?;
                     let end_index = find_matching_end(statements, cursor, stop)
                         .ok_or_else(|| "IF THEN DO block missing matching END".to_string())?;
@@ -944,7 +1137,7 @@ fn execute_statement_block(
                     continue;
                 }
 
-                if let Some((condition, action)) = statement_if_then_action(statement, "if") {
+                if let Some((condition, action)) = statement_if_then_action(statement) {
                     let matched = scalar_to_bool(&evaluate_scalar_expression(row, &condition, state)?)?;
                     if matched {
                         execute_inline_action(py, &action, row, state, &mut outcome)?;
@@ -961,7 +1154,7 @@ fn execute_statement_block(
 
                     let mut next_cursor = cursor + 1;
                     if next_cursor < stop && statements[next_cursor].kind == "ELSE IF" {
-                        if let Some((else_if_condition, else_if_action)) = statement_if_then_action(&statements[next_cursor], "else if") {
+                        if let Some((else_if_condition, else_if_action)) = statement_if_then_action(&statements[next_cursor]) {
                             if scalar_to_bool(&evaluate_scalar_expression(row, &else_if_condition, state)?)? {
                                 execute_inline_action(py, &else_if_action, row, state, &mut outcome)?;
                                 if outcome.deleted || outcome.stopped {
@@ -990,7 +1183,7 @@ fn execute_statement_block(
                     continue;
                 }
 
-                if let Some(condition) = statement_subset_if_condition(statement, "if") {
+                if let Some(condition) = statement_subset_if_condition(statement) {
                     let matched = scalar_to_bool(&evaluate_scalar_expression(row, &condition, state)?)?;
                     if !matched {
                         outcome.deleted = true;
@@ -1089,6 +1282,15 @@ fn tokenize_expression(expression: &str) -> Result<Vec<Token>, String> {
                 index += 1;
             }
             let raw: String = chars[start..index].iter().collect();
+            let next_non_space = chars[index..].iter().copied().find(|candidate| !candidate.is_whitespace());
+            if raw.ends_with('.') && matches!(next_non_space, Some(',') | Some(')')) {
+                tokens.push(Token::Text(raw));
+                continue;
+            }
+            if raw.ends_with('.') && raw[..raw.len() - 1].contains('.') {
+                tokens.push(Token::Identifier(raw));
+                continue;
+            }
             let number = raw.parse::<f64>().map_err(|_| format!("invalid number literal: {raw}"))?;
             tokens.push(Token::Number(number));
             continue;
@@ -1259,6 +1461,9 @@ fn py_to_scalar(value: &Bound<'_, PyAny>) -> PyResult<ScalarValue> {
     if value.is_none() {
         return Ok(ScalarValue::Null);
     }
+    if let Some(temporal) = py_temporal_to_scalar(value)? {
+        return Ok(temporal);
+    }
     if let Ok(boolean) = value.extract::<bool>() {
         return Ok(ScalarValue::Bool(boolean));
     }
@@ -1266,6 +1471,50 @@ fn py_to_scalar(value: &Bound<'_, PyAny>) -> PyResult<ScalarValue> {
         return Ok(ScalarValue::Number(number));
     }
     Ok(ScalarValue::Text(value.str()?.to_string()))
+}
+
+fn py_temporal_to_scalar(value: &Bound<'_, PyAny>) -> PyResult<Option<ScalarValue>> {
+    let py = value.py();
+    let datetime_module = py.import("datetime")?;
+    let datetime_type = datetime_module.getattr("datetime")?;
+    if value.is_instance(&datetime_type)? {
+        let year = value.getattr("year")?.extract::<i32>()?;
+        let month = value.getattr("month")?.extract::<u32>()?;
+        let day = value.getattr("day")?.extract::<u32>()?;
+        let hour = value.getattr("hour")?.extract::<u32>()?;
+        let minute = value.getattr("minute")?.extract::<u32>()?;
+        let second = value.getattr("second")?.extract::<u32>()?;
+        let microsecond = value.getattr("microsecond")?.extract::<u32>()?;
+        let date = NaiveDate::from_ymd_opt(year, month, day)
+            .ok_or_else(|| PyValueError::new_err("invalid python datetime date component"))?;
+        let datetime = date
+            .and_hms_micro_opt(hour, minute, second, microsecond)
+            .ok_or_else(|| PyValueError::new_err("invalid python datetime time component"))?;
+        return Ok(Some(ScalarValue::DateTime(datetime)));
+    }
+
+    let date_type = datetime_module.getattr("date")?;
+    if value.is_instance(&date_type)? {
+        let year = value.getattr("year")?.extract::<i32>()?;
+        let month = value.getattr("month")?.extract::<u32>()?;
+        let day = value.getattr("day")?.extract::<u32>()?;
+        let date = NaiveDate::from_ymd_opt(year, month, day)
+            .ok_or_else(|| PyValueError::new_err("invalid python date component"))?;
+        return Ok(Some(ScalarValue::Date(date)));
+    }
+
+    let time_type = datetime_module.getattr("time")?;
+    if value.is_instance(&time_type)? {
+        let hour = value.getattr("hour")?.extract::<u32>()?;
+        let minute = value.getattr("minute")?.extract::<u32>()?;
+        let second = value.getattr("second")?.extract::<u32>()?;
+        let microsecond = value.getattr("microsecond")?.extract::<u32>()?;
+        let time = NaiveTime::from_hms_micro_opt(hour, minute, second, microsecond)
+            .ok_or_else(|| PyValueError::new_err("invalid python time component"))?;
+        return Ok(Some(ScalarValue::Time(time)));
+    }
+
+    Ok(None)
 }
 
 fn scalar_to_number(value: &ScalarValue) -> Result<f64, String> {
@@ -1276,6 +1525,8 @@ fn scalar_to_number(value: &ScalarValue) -> Result<f64, String> {
             .parse::<f64>()
             .map_err(|_| format!("numeric value required, got '{text}'")),
         ScalarValue::Date(_) => Err("date value cannot be converted to number".to_string()),
+        ScalarValue::DateTime(_) => Err("datetime value cannot be converted to number".to_string()),
+        ScalarValue::Time(_) => Err("time value cannot be converted to number".to_string()),
         ScalarValue::Null => Ok(0.0),
     }
 }
@@ -1292,6 +1543,8 @@ fn scalar_to_text(value: &ScalarValue) -> String {
             }
         }
         ScalarValue::Date(date) => date.to_string(),
+        ScalarValue::DateTime(datetime) => datetime.format("%Y-%m-%dT%H:%M:%S").to_string(),
+        ScalarValue::Time(time) => time.format("%H:%M:%S").to_string(),
         ScalarValue::Null => "".to_string(),
     }
 }
@@ -1299,10 +1552,38 @@ fn scalar_to_text(value: &ScalarValue) -> String {
 fn scalar_to_date(value: &ScalarValue) -> Result<NaiveDate, String> {
     match value {
         ScalarValue::Date(date) => Ok(*date),
+        ScalarValue::DateTime(datetime) => Ok(datetime.date()),
         ScalarValue::Text(text) => NaiveDate::parse_from_str(text, "%Y-%m-%d")
             .map_err(|_| format!("date value required, got '{text}'")),
         _ => Err("date value required".to_string()),
     }
+}
+
+fn scalar_to_datetime(value: &ScalarValue) -> Result<NaiveDateTime, String> {
+    match value {
+        ScalarValue::DateTime(datetime) => Ok(*datetime),
+        ScalarValue::Date(date) => date
+            .and_hms_opt(0, 0, 0)
+            .ok_or_else(|| "datetime value required".to_string()),
+        ScalarValue::Text(text) => NaiveDateTime::parse_from_str(text, "%Y-%m-%dT%H:%M:%S")
+            .map_err(|_| format!("datetime value required, got '{text}'")),
+        _ => Err("datetime value required".to_string()),
+    }
+}
+
+fn scalar_to_time(value: &ScalarValue) -> Result<NaiveTime, String> {
+    match value {
+        ScalarValue::Time(time) => Ok(*time),
+        ScalarValue::DateTime(datetime) => Ok(datetime.time()),
+        ScalarValue::Text(text) => parse_time_text(text),
+        _ => Err("time value required".to_string()),
+    }
+}
+
+fn parse_time_text(text: &str) -> Result<NaiveTime, String> {
+    NaiveTime::parse_from_str(text, "%H:%M:%S")
+        .or_else(|_| NaiveTime::parse_from_str(text, "%H:%M"))
+        .map_err(|_| format!("time value required, got '{text}'"))
 }
 
 fn scalar_is_missing(value: &ScalarValue) -> bool {
@@ -1315,6 +1596,8 @@ fn scalar_to_bool(value: &ScalarValue) -> Result<bool, String> {
         ScalarValue::Number(number) => Ok(number.abs() >= f64::EPSILON),
         ScalarValue::Text(text) => Ok(!text.is_empty()),
         ScalarValue::Date(_) => Ok(true),
+        ScalarValue::DateTime(_) => Ok(true),
+        ScalarValue::Time(_) => Ok(true),
         ScalarValue::Null => Ok(false),
     }
 }
@@ -1329,6 +1612,23 @@ fn scalar_eq(left: &ScalarValue, right: &ScalarValue) -> Result<bool, String> {
         }
         (ScalarValue::Text(l), ScalarValue::Text(r)) => Ok(l == r),
         (ScalarValue::Date(l), ScalarValue::Date(r)) => Ok(l == r),
+        (ScalarValue::DateTime(l), ScalarValue::DateTime(r)) => Ok(l == r),
+        (ScalarValue::Time(l), ScalarValue::Time(r)) => Ok(l == r),
+        _ => Ok(false),
+    }
+}
+
+fn optional_pyvalues_equal(
+    left: Option<&Bound<'_, PyAny>>,
+    right: Option<&Bound<'_, PyAny>>,
+) -> Result<bool, String> {
+    match (left, right) {
+        (Some(lhs), Some(rhs)) => {
+            let lhs_scalar = py_to_scalar(lhs).map_err(|error| error.to_string())?;
+            let rhs_scalar = py_to_scalar(rhs).map_err(|error| error.to_string())?;
+            scalar_eq(&lhs_scalar, &rhs_scalar)
+        }
+        (None, None) => Ok(true),
         _ => Ok(false),
     }
 }
@@ -1337,6 +1637,8 @@ fn scalar_compare(left: &ScalarValue, right: &ScalarValue) -> Result<std::cmp::O
     match (left, right) {
         (ScalarValue::Text(l), ScalarValue::Text(r)) => Ok(l.cmp(r)),
         (ScalarValue::Date(l), ScalarValue::Date(r)) => Ok(l.cmp(r)),
+        (ScalarValue::DateTime(l), ScalarValue::DateTime(r)) => Ok(l.cmp(r)),
+        (ScalarValue::Time(l), ScalarValue::Time(r)) => Ok(l.cmp(r)),
         _ => {
             let l = scalar_to_number(left)?;
             let r = scalar_to_number(right)?;
@@ -1344,6 +1646,194 @@ fn scalar_compare(left: &ScalarValue, right: &ScalarValue) -> Result<std::cmp::O
                 .ok_or_else(|| "comparison failed".to_string())
         }
     }
+}
+
+fn normalize_format_name(value: &ScalarValue) -> (String, bool) {
+    let raw = scalar_to_text(value).trim().to_ascii_lowercase();
+    let has_dot = raw.contains('.');
+    (raw.trim_end_matches('.').to_string(), has_dot)
+}
+
+fn requires_numeric_format_dot(format_name: &str, has_dot: bool) -> bool {
+    if has_dot {
+        return false;
+    }
+
+    parse_width_precision(format_name).is_some()
+        || format_name
+            .strip_prefix('z')
+            .and_then(parse_width_precision)
+            .is_some()
+        || format_name
+            .strip_prefix("comma")
+            .and_then(parse_width_precision)
+            .is_some()
+}
+
+fn parse_width_precision(format_name: &str) -> Option<(usize, Option<usize>)> {
+    let (width_part, precision_part) = format_name.split_once('.').unwrap_or((format_name, ""));
+    let width = width_part.parse::<usize>().ok()?;
+    if precision_part.is_empty() {
+        return Some((width, None));
+    }
+    let precision = precision_part.parse::<usize>().ok()?;
+    Some((width, Some(precision)))
+}
+
+fn format_fixed_number(number: f64, decimals: usize) -> String {
+    format!("{number:.decimals$}")
+}
+
+fn format_zero_filled_number(number: f64, width: usize, decimals: usize) -> String {
+    let rendered = format_fixed_number(number, decimals);
+    let (sign, unsigned) = match rendered.strip_prefix('-') {
+        Some(rest) => ("-", rest),
+        None => ("", rendered.as_str()),
+    };
+    let padding = width.saturating_sub(sign.len() + unsigned.len());
+    format!("{sign}{}{unsigned}", "0".repeat(padding))
+}
+
+fn format_grouped_number(number: f64, decimals: usize) -> String {
+    let rendered = format_fixed_number(number, decimals);
+    let (sign, unsigned) = match rendered.strip_prefix('-') {
+        Some(rest) => ("-", rest),
+        None => ("", rendered.as_str()),
+    };
+    let (integer_part, fractional_part) = unsigned.split_once('.').unwrap_or((unsigned, ""));
+    let grouped_integer = group_digits(integer_part);
+    if fractional_part.is_empty() {
+        return format!("{sign}{grouped_integer}");
+    }
+    format!("{sign}{grouped_integer}.{fractional_part}")
+}
+
+fn format_best_number(number: f64) -> String {
+    if number.fract().abs() < f64::EPSILON {
+        return format!("{:.0}", number);
+    }
+    number.to_string()
+}
+
+fn group_digits(integer_part: &str) -> String {
+    let mut grouped = String::with_capacity(integer_part.len() + integer_part.len() / 3);
+    for (index, ch) in integer_part.chars().enumerate() {
+        if index > 0 && (integer_part.len() - index) % 3 == 0 {
+            grouped.push(',');
+        }
+        grouped.push(ch);
+    }
+    grouped
+}
+
+fn put_builtin(value: &ScalarValue, format_name: &str) -> Result<ScalarValue, String> {
+    if matches!(value, ScalarValue::Null) {
+        return Ok(ScalarValue::Null);
+    }
+
+    if let Some(z_spec) = format_name.strip_prefix('z') {
+        let (width, precision) = parse_width_precision(z_spec)
+            .ok_or_else(|| format!("Unsupported format: {format_name}"))?;
+        let number = scalar_to_number(value)?;
+        let rendered = format_zero_filled_number(number, width, precision.unwrap_or(0));
+        return Ok(ScalarValue::Text(rendered));
+    }
+
+    if let Some((width, precision)) = parse_width_precision(format_name) {
+        let number = scalar_to_number(value)?;
+        let _ = width;
+        let rendered = format_fixed_number(number, precision.unwrap_or(0));
+        return Ok(ScalarValue::Text(rendered));
+    }
+
+    if let Some(comma_spec) = format_name.strip_prefix("comma") {
+        if let Some((_, precision)) = parse_width_precision(comma_spec) {
+            let number = scalar_to_number(value)?;
+            let rendered = format_grouped_number(number, precision.unwrap_or(0));
+            return Ok(ScalarValue::Text(rendered));
+        }
+    }
+
+    match format_name {
+        "best" => Ok(ScalarValue::Text(format_best_number(scalar_to_number(value)?))),
+        "e8601da" => Ok(ScalarValue::Text(scalar_to_date(value)?.format("%Y-%m-%d").to_string())),
+        "e8601dt" => Ok(ScalarValue::Text(
+            scalar_to_datetime(value)?.format("%Y-%m-%dT%H:%M:%S").to_string(),
+        )),
+        "time" => Ok(ScalarValue::Text(scalar_to_time(value)?.format("%H:%M:%S").to_string())),
+        _ => Err(format!("Unsupported format: {format_name}")),
+    }
+}
+
+fn input_builtin(value: &ScalarValue, format_name: &str) -> Result<ScalarValue, String> {
+    let raw = scalar_to_text(value);
+    let text = raw.trim();
+    if text.is_empty() {
+        return Ok(ScalarValue::Null);
+    }
+
+    match format_name {
+        "best" => Ok(ScalarValue::Number(
+            text.parse::<f64>()
+                .map_err(|_| format!("Invalid numeric value: {text}"))?,
+        )),
+        "yymmdd6" => {
+            let year = text[0..2]
+                .parse::<i32>()
+                .map_err(|_| format!("Invalid yymmdd6 value: {text}"))?;
+            let month = text[2..4]
+                .parse::<u32>()
+                .map_err(|_| format!("Invalid yymmdd6 value: {text}"))?;
+            let day = text[4..6]
+                .parse::<u32>()
+                .map_err(|_| format!("Invalid yymmdd6 value: {text}"))?;
+            let date = NaiveDate::from_ymd_opt(2000 + year, month, day)
+                .ok_or_else(|| format!("Invalid yymmdd6 value: {text}"))?;
+            Ok(ScalarValue::Date(date))
+        }
+        "yymmdd8" => {
+            let year = text[0..4]
+                .parse::<i32>()
+                .map_err(|_| format!("Invalid yymmdd8 value: {text}"))?;
+            let month = text[4..6]
+                .parse::<u32>()
+                .map_err(|_| format!("Invalid yymmdd8 value: {text}"))?;
+            let day = text[6..8]
+                .parse::<u32>()
+                .map_err(|_| format!("Invalid yymmdd8 value: {text}"))?;
+            let date = NaiveDate::from_ymd_opt(year, month, day)
+                .ok_or_else(|| format!("Invalid yymmdd8 value: {text}"))?;
+            Ok(ScalarValue::Date(date))
+        }
+        "yymmdd10" | "e8601da" => Ok(ScalarValue::Date(
+            NaiveDate::parse_from_str(text, "%Y-%m-%d")
+                .map_err(|_| format!("Invalid date value: {text}"))?,
+        )),
+        "e8601dt" => Ok(ScalarValue::DateTime(
+            NaiveDateTime::parse_from_str(text, "%Y-%m-%dT%H:%M:%S")
+                .map_err(|_| format!("Invalid datetime value: {text}"))?,
+        )),
+        "time" => Ok(ScalarValue::Time(parse_time_text(text)?)),
+        _ => Err(format!("Unsupported informat: {format_name}")),
+    }
+}
+
+fn hour_builtin(value: &ScalarValue) -> Result<ScalarValue, String> {
+    if matches!(value, ScalarValue::Null) {
+        return Ok(ScalarValue::Null);
+    }
+
+    let time = match value {
+        ScalarValue::Time(time) => *time,
+        ScalarValue::DateTime(datetime) => datetime.time(),
+        ScalarValue::Text(text) => parse_time_text(text.trim())?,
+        _ => return Err("hour() requires a time-like value".to_string()),
+    };
+
+    let hour_value = f64::from(time.hour())
+        + f64::from(time.minute()) / 60.0
+        + f64::from(time.second()) / 3600.0;
+    Ok(ScalarValue::Number(hour_value))
 }
 
 fn parse_prx_flags(flags_part: &str) -> Result<(bool, bool, bool, bool), String> {
@@ -1435,6 +1925,29 @@ fn evaluate_function(
 
     let lowered = name.to_lowercase();
     match lowered.as_str() {
+        "put" => {
+            if args.len() != 2 {
+                return Err("put() expects 2 arguments".to_string());
+            }
+            let (format_name, has_dot) = normalize_format_name(&args[1]);
+            if requires_numeric_format_dot(&format_name, has_dot) {
+                return Err(format!("Unsupported format: {}", scalar_to_text(&args[1])));
+            }
+            put_builtin(&args[0], &format_name)
+        }
+        "input" => {
+            if args.len() != 2 {
+                return Err("input() expects 2 arguments".to_string());
+            }
+            let (format_name, _) = normalize_format_name(&args[1]);
+            input_builtin(&args[0], &format_name)
+        }
+        "hour" => {
+            if args.len() != 1 {
+                return Err("hour() expects 1 argument".to_string());
+            }
+            hour_builtin(&args[0])
+        }
         "substr" => {
             if args.len() < 2 || args.len() > 3 {
                 return Err("substr() expects 2 or 3 arguments".to_string());
@@ -1995,8 +2508,11 @@ fn evaluate_expression(row: &Bound<'_, PyDict>, expr: &Expr, state: &mut EvalRun
     match expr {
         Expr::Literal(value) => Ok(value.clone()),
         Expr::Variable(name) => {
-            let value_any = row.get_item(name).map_err(|error| error.to_string())?;
+            let value_any = get_row_item(row, name)?;
             let Some(value) = value_any else {
+                if name.ends_with('.') {
+                    return Ok(ScalarValue::Text(name.to_string()));
+                }
                 return Ok(ScalarValue::Null);
             };
             py_to_scalar(&value).map_err(|error| error.to_string())
@@ -2004,7 +2520,7 @@ fn evaluate_expression(row: &Bound<'_, PyDict>, expr: &Expr, state: &mut EvalRun
         Expr::ArrayRef { name, index } => {
             let index_value = scalar_to_number(&evaluate_expression(row, index, state)?)?;
             let variable_name = resolve_array_variable_name(state, name, index_value)?;
-            let value_any = row.get_item(&variable_name).map_err(|error| error.to_string())?;
+            let value_any = get_row_item(row, &variable_name)?;
             let Some(value) = value_any else {
                 return Ok(ScalarValue::Null);
             };
@@ -2071,7 +2587,7 @@ fn evaluate_expression(row: &Bound<'_, PyDict>, expr: &Expr, state: &mut EvalRun
             if state.array_defs.contains_key(name) && args.len() == 1 {
                 let index_value = scalar_to_number(&evaluate_expression(row, &args[0], state)?)?;
                 let variable_name = resolve_array_variable_name(state, name, index_value)?;
-                let value_any = row.get_item(&variable_name).map_err(|error| error.to_string())?;
+                let value_any = get_row_item(row, &variable_name)?;
                 let Some(value) = value_any else {
                     return Ok(ScalarValue::Null);
                 };
@@ -2109,10 +2625,7 @@ fn apply_dataset_ref_options_to_row(
     if !options.keep_vars.is_empty() {
         let projected = PyDict::new(py);
         for name in &options.keep_vars {
-            if let Some(value) = working
-                .get_item(name)
-                .map_err(|error| format!("dataset option keep lookup failed: {error}"))?
-            {
+            if let Some(value) = get_row_item(&working, name)? {
                 projected
                     .set_item(name, value)
                     .map_err(|error| format!("dataset option keep set failed: {error}"))?;
@@ -2123,35 +2636,38 @@ fn apply_dataset_ref_options_to_row(
 
     if !options.drop_vars.is_empty() {
         for name in &options.drop_vars {
-            working.del_item(name).ok();
+            delete_row_item(&working, name).ok();
         }
     }
 
     if !options.rename_map.is_empty() {
         let mut rename_targets: Vec<String> = Vec::new();
         for value in options.rename_map.values() {
-            if rename_targets.contains(value) {
+            let normalized_target = column_key(value);
+            if rename_targets.contains(&normalized_target) {
                 return Err("dataset option RENAME= has duplicate target names".to_string());
             }
-            rename_targets.push(value.clone());
+            rename_targets.push(normalized_target);
         }
 
         for old_name in options.rename_map.keys() {
-            if working
-                .get_item(old_name)
-                .map_err(|error| format!("dataset option rename lookup failed: {error}"))?
-                .is_none()
-            {
+            if get_row_item(&working, old_name)?.is_none() {
                 return Err(format!("dataset option RENAME= references unknown variable: {old_name}"));
             }
         }
 
         let renamed = PyDict::new(py);
+        let mut resolved_rename_map: HashMap<String, String> = HashMap::new();
+        for (old_name, new_name) in &options.rename_map {
+            if let Some(resolved_name) = resolve_row_key(&working, old_name)? {
+                resolved_rename_map.insert(resolved_name, new_name.clone());
+            }
+        }
         for (key_any, value_any) in working.iter() {
             let key = key_any
                 .extract::<String>()
                 .map_err(|error| format!("dataset option rename key extract failed: {error}"))?;
-            let renamed_key = options.rename_map.get(&key).cloned().unwrap_or(key);
+            let renamed_key = resolved_rename_map.get(&key).cloned().unwrap_or(key);
             renamed
                 .set_item(renamed_key, value_any)
                 .map_err(|error| format!("dataset option rename set failed: {error}"))?;
@@ -2292,62 +2808,26 @@ fn export_output_streams(py: Python<'_>, outputs: &Bound<'_, PyDict>) -> Result<
 fn execute_block(py: Python<'_>, payload: &Bound<'_, PyDict>) -> PyResult<Py<PyDict>> {
     let result = PyDict::new(py);
     let diagnostics = PyList::empty(py);
-    let mut parsed_ast_statements: Option<Vec<AstStatement>> = None;
-
-    if let Some(ast_json_any) = payload.get_item("ast_json")? {
-        if let Ok(ast_json) = ast_json_any.extract::<String>() {
-            match serde_json::from_str::<AstPayload>(&ast_json) {
-                Ok(parsed_ast) => {
-                    parsed_ast_statements = Some(parsed_ast.statements);
-                }
-                Err(error) => {
-                    diagnostics.append(diag(
-                        py,
-                        "PARSE_RUST_AST_DESERIALIZE_FAILED",
-                        "ast",
-                        &format!("Rust native parser/runtime failed to deserialize AST payload: {}", error),
-                    )?)?;
-                    result.set_item("outputs", PyDict::new(py))?;
-                    result.set_item("diagnostics", diagnostics)?;
-                    return Ok(result.unbind());
-                }
-            }
+    let ast_json = payload
+        .get_item("ast_json")?
+        .ok_or_else(|| PyValueError::new_err("payload.ast_json is required"))?
+        .extract::<String>()?;
+    let runtime_statements = match serde_json::from_str::<AstPayload>(&ast_json) {
+        Ok(parsed_ast) => parsed_ast.statements,
+        Err(error) => {
+            diagnostics.append(diag(
+                py,
+                "PARSE_RUST_AST_DESERIALIZE_FAILED",
+                "ast",
+                &format!("Rust native parser/runtime failed to deserialize AST payload: {}", error),
+            )?)?;
+            result.set_item("outputs", PyDict::new(py))?;
+            result.set_item("diagnostics", diagnostics)?;
+            return Ok(result.unbind());
         }
-    }
+    };
 
-    let statements_any = payload
-        .get_item("statements")?
-        .ok_or_else(|| PyValueError::new_err("payload.statements is required"))?;
-    let statements = statements_any.downcast::<PyList>()?;
-    let kinds = extract_statement_kinds(&statements)?;
-
-    let mut runtime_statements: Vec<AstStatement> = Vec::new();
-    if let Some(parsed) = parsed_ast_statements {
-        if parsed.len() == kinds.len() {
-            runtime_statements = parsed;
-        }
-    }
-    if runtime_statements.is_empty() {
-        for statement in statements.iter() {
-            let statement_dict = statement.downcast::<PyDict>()?;
-            let kind = statement_dict
-                .get_item("kind")?
-                .ok_or_else(|| PyValueError::new_err("statement.kind is required"))?
-                .extract::<String>()?;
-            let text = statement_dict
-                .get_item("text")?
-                .ok_or_else(|| PyValueError::new_err("statement.text is required"))?
-                .extract::<String>()?;
-            runtime_statements.push(AstStatement {
-                kind,
-                text,
-                dataset_refs: Vec::new(),
-                statement_options: AstStatementOptions::default(),
-                rename_map: HashMap::new(),
-                if_spec: None,
-            });
-        }
-    }
+    let kinds: Vec<String> = runtime_statements.iter().map(|statement| statement.kind.clone()).collect();
 
     let supported = [
         "DATA", "SET", "WHERE", "OUTPUT", "KEEP", "DROP", "RUN", "IF", "ELSE IF", "ELSE", "DO", "END",
@@ -2384,11 +2864,7 @@ fn execute_block(py: Python<'_>, payload: &Bound<'_, PyDict>) -> PyResult<Py<PyD
 
     for statement in &runtime_statements {
         if statement.kind == "DATA" {
-            let mut data_refs = statement.dataset_refs.clone();
-            if data_refs.is_empty() {
-                data_refs = parse_dataset_refs_from_statement(&statement.text, "data");
-            }
-            for dataset_ref in &data_refs {
+            for dataset_ref in &statement.dataset_refs {
                 let effective_options = dataset_ref.options.clone();
 
                 if !effective_options.keep_vars.is_empty()
@@ -2401,13 +2877,8 @@ fn execute_block(py: Python<'_>, payload: &Bound<'_, PyDict>) -> PyResult<Py<PyD
             continue;
         }
         if statement.kind == "SET" {
-            let mut set_refs = statement.dataset_refs.clone();
-            if set_refs.is_empty() {
-                set_refs = parse_dataset_refs_from_statement(&statement.text, "set");
-            }
-
-            if !set_refs.is_empty() {
-                for dataset_ref in &set_refs {
+            if !statement.dataset_refs.is_empty() {
+                for dataset_ref in &statement.dataset_refs {
                     let effective_options = dataset_ref.options.clone();
 
                     set_input_names.push(dataset_ref.name.clone());
@@ -2419,13 +2890,6 @@ fn execute_block(py: Python<'_>, payload: &Bound<'_, PyDict>) -> PyResult<Py<PyD
                 }
                 indsname_var = statement.statement_options.indsname_var.clone();
                 end_var = statement.statement_options.end_var.clone();
-            } else {
-                let body = statement_body(&statement.text, "set");
-                for name in body.split_whitespace() {
-                    if !name.is_empty() {
-                        set_input_names.push(name.to_string());
-                    }
-                }
             }
             continue;
         }
@@ -2648,7 +3112,10 @@ fn execute_block(py: Python<'_>, payload: &Bound<'_, PyDict>) -> PyResult<Py<PyD
             }
 
             for retained_name in &retain_vars {
-                if working_row.get_item(retained_name)?.is_none() {
+                if get_row_item(&working_row, retained_name)
+                    .map_err(PyValueError::new_err)?
+                    .is_none()
+                {
                     if let Some(value) = eval_state.retain_values.get(retained_name).cloned() {
                         set_row_scalar(&working_row, retained_name, &value).ok();
                     }
@@ -2659,26 +3126,23 @@ fn execute_block(py: Python<'_>, payload: &Bound<'_, PyDict>) -> PyResult<Py<PyD
                 let prev_index = if row_index > 0 { Some(row_index - 1) } else { None };
                 let next_index = if row_index + 1 < row_count { Some(row_index + 1) } else { None };
                 for by_var in &by_vars {
-                    let current_value = working_row.get_item(by_var)?;
+                    let current_value = get_row_item(&working_row, by_var)
+                        .map_err(PyValueError::new_err)?;
                     let is_first = if let Some(prev_idx) = prev_index {
                         let prev_row = eval_state.row_view[prev_idx].bind(py);
-                        let prev_value = prev_row.get_item(by_var)?;
-                        match (current_value.as_ref(), prev_value.as_ref()) {
-                            (Some(c), Some(p)) => !c.eq(p).unwrap_or(false),
-                            (None, None) => false,
-                            _ => true,
-                        }
+                        let prev_value = get_row_item(&prev_row, by_var)
+                            .map_err(PyValueError::new_err)?;
+                        !optional_pyvalues_equal(current_value.as_ref(), prev_value.as_ref())
+                            .map_err(PyValueError::new_err)?
                     } else {
                         true
                     };
                     let is_last = if let Some(next_idx) = next_index {
                         let next_row = eval_state.row_view[next_idx].bind(py);
-                        let next_value = next_row.get_item(by_var)?;
-                        match (current_value.as_ref(), next_value.as_ref()) {
-                            (Some(c), Some(n)) => !c.eq(n).unwrap_or(false),
-                            (None, None) => false,
-                            _ => true,
-                        }
+                        let next_value = get_row_item(&next_row, by_var)
+                            .map_err(PyValueError::new_err)?;
+                        !optional_pyvalues_equal(current_value.as_ref(), next_value.as_ref())
+                            .map_err(PyValueError::new_err)?
                     } else {
                         true
                     };
@@ -2734,7 +3198,9 @@ fn execute_block(py: Python<'_>, payload: &Bound<'_, PyDict>) -> PyResult<Py<PyD
             };
 
             for retained_name in &retain_vars {
-                if let Some(value_any) = working_row.get_item(retained_name)? {
+                if let Some(value_any) = get_row_item(&working_row, retained_name)
+                    .map_err(PyValueError::new_err)?
+                {
                     if let Ok(value) = py_to_scalar(&value_any) {
                         eval_state.retain_values.insert(retained_name.clone(), value);
                     }
@@ -2847,73 +3313,21 @@ fn execute_block(py: Python<'_>, payload: &Bound<'_, PyDict>) -> PyResult<Py<PyD
 }
 
 #[pyfunction]
-fn parse_subset(py: Python<'_>, dsl_text: &str) -> PyResult<Py<PyDict>> {
-    let result = PyDict::new(py);
-    let diagnostics = PyList::empty(py);
-    let statement_kinds = PyList::empty(py);
-
-    let mut is_supported = true;
-    for (index, segment) in dsl_text
-        .split(';')
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .enumerate()
-    {
-        let parsed_kind = parse_statement_kind_with_chumsky(segment);
-
-        if let Some(kind) = parsed_kind {
-            statement_kinds.append(kind)?;
-        } else {
-            is_supported = false;
-            diagnostics.append(diag(
-                py,
-                "PARSE_BACKEND_CAPABILITY_MISSING",
-                &format!("statement:{}", index + 1),
-                &format!("Rust native parser does not support statement: {}", segment),
-            )?)?;
+fn render_diagnostics_ariadne(payload: &Bound<'_, PyDict>) -> PyResult<String> {
+    let render_payload = extract_render_payload(payload)?;
+    let mut rendered: Vec<String> = Vec::new();
+    for diagnostic in &render_payload.diagnostics {
+        match render_ariadne_diagnostic(diagnostic, &render_payload) {
+            Ok(output) => rendered.push(output),
+            Err(_) => rendered.push(render_simple_diagnostic(diagnostic)),
         }
     }
-
-    result.set_item("supported", is_supported)?;
-    result.set_item("statement_kinds", statement_kinds)?;
-    result.set_item("diagnostics", diagnostics)?;
-    Ok(result.unbind())
-}
-
-fn parse_statement_kind_with_chumsky(segment: &str) -> Option<&'static str> {
-    let keyword_parser = choice((
-        just::<_, _, extra::Err<Simple<char>>>("data").to("DATA"),
-        just::<_, _, extra::Err<Simple<char>>>("set").to("SET"),
-        just::<_, _, extra::Err<Simple<char>>>("where").to("WHERE"),
-        just::<_, _, extra::Err<Simple<char>>>("if").to("IF"),
-        just::<_, _, extra::Err<Simple<char>>>("else if").to("ELSE IF"),
-        just::<_, _, extra::Err<Simple<char>>>("else").to("ELSE"),
-        just::<_, _, extra::Err<Simple<char>>>("do").to("DO"),
-        just::<_, _, extra::Err<Simple<char>>>("end").to("END"),
-        just::<_, _, extra::Err<Simple<char>>>("by").to("BY"),
-        just::<_, _, extra::Err<Simple<char>>>("delete").to("DELETE"),
-        just::<_, _, extra::Err<Simple<char>>>("stop").to("STOP"),
-        just::<_, _, extra::Err<Simple<char>>>("retain").to("RETAIN"),
-        just::<_, _, extra::Err<Simple<char>>>("array").to("ARRAY"),
-        just::<_, _, extra::Err<Simple<char>>>("output").to("OUTPUT"),
-        just::<_, _, extra::Err<Simple<char>>>("run").to("RUN"),
-    ))
-    .then_ignore(choice((
-        end(),
-        text::whitespace::<_, extra::Err<Simple<char>>>()
-            .at_least(1)
-            .ignored()
-            .then(any().repeated())
-            .ignored(),
-    )));
-
-    let lowered = segment.to_lowercase();
-    keyword_parser.parse(lowered.as_str()).into_result().ok()
+    Ok(rendered.join("\n"))
 }
 
 #[pymodule]
 fn limulus_native(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(execute_block, module)?)?;
-    module.add_function(wrap_pyfunction!(parse_subset, module)?)?;
+    module.add_function(wrap_pyfunction!(render_diagnostics_ariadne, module)?)?;
     Ok(())
 }

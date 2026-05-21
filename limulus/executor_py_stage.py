@@ -353,7 +353,7 @@ class _PythonProgramExecutionService:
             for statement in ast_statements
         )
         has_advanced_runtime = has_advanced_runtime or any(
-            statement.kind == "IF" and self._owner._parse_if_then_do_condition(statement.text) is not None
+            statement.kind == "IF" and self._owner._parse_if_then_do_condition(statement) is not None
             for statement in ast_statements
         )
         drop_vars = self._owner._extract_variable_list(ast_statements, "DROP")

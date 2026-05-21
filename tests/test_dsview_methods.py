@@ -161,6 +161,29 @@ def test_dataset_view_chained_methods() -> None:
     assert view.to_arrow().to_pylist() == scenario["expected_output"]
 
 
+def test_dataset_view_chained_methods_resolve_columns_case_insensitively() -> None:
+    session = Session()
+    session.load(
+        "src",
+        pa.table(
+            {
+                "Id": [1, 2],
+                "Amount": [10, -1],
+                "Name": ["Alice", "Bob"],
+            }
+        ),
+    )
+
+    view = (
+        session.dataset("src")
+        .where("amount > 0", out="flt")
+        .keep(["ID", "name"], out="out")
+    )
+
+    assert view.name == "out"
+    assert view.to_arrow().to_pylist() == [{"Id": 1, "Name": "Alice"}]
+
+
 def test_dataset_view_astype() -> None:
     scenario = DATASET_VIEW_METHOD_SCENARIOS["cast"]
     session = Session()
@@ -180,6 +203,20 @@ def test_dataset_view_astype_preserves_arrow_type_on_materialized_view() -> None
     session.dataset("src").astype({"amount": "float32"}, out="typed_view")
 
     assert session.to_arrow("typed_view").column("amount").type == scenario["expected_type"]
+
+
+def test_dataset_view_astype_alias_adds_new_typed_column() -> None:
+    session = Session()
+    session.load("src", pa.table({"id": [1, 2], "amount": [1.25, 2.5]}))
+
+    view = session.dataset("src").astype({"amount": "float32"}, alias="amount_f32", out="typed_view")
+
+    assert view.to_arrow().column("amount").type == pa.float64()
+    assert view.to_arrow().column("amount_f32").type == pa.float32()
+    assert view.to_arrow().to_pylist() == [
+        {"id": 1, "amount": 1.25, "amount_f32": 1.25},
+        {"id": 2, "amount": 2.5, "amount_f32": 2.5},
+    ]
 
 
 def test_dataset_view_cast_preserves_arrow_metadata_after_polars_roundtrip() -> None:
@@ -228,3 +265,33 @@ def test_dataset_view_assign_uses_out_parameter_and_left_to_right_evaluation() -
 
     assert view.name == scenario["expected_name"]
     assert view.to_arrow().to_pylist() == scenario["expected_output"]
+
+
+def test_dataset_view_dictionary_returns_dataset_specific_columns() -> None:
+    session = Session()
+    session.load("src", pa.table({"id": [1], "name": ["Alice"]}))
+
+    assert session.dataset("src").dictionary.to_pylist() == [
+        {
+            "LIBNAME": "WORK",
+            "MEMNAME": "SRC",
+            "MEMTYPE": "DATA",
+            "NAME": "id",
+            "TYPE": "int64",
+            "VARNUM": 1,
+            "LABEL": "",
+            "FORMAT": "",
+            "INFORMAT": "",
+        },
+        {
+            "LIBNAME": "WORK",
+            "MEMNAME": "SRC",
+            "MEMTYPE": "DATA",
+            "NAME": "name",
+            "TYPE": "string",
+            "VARNUM": 2,
+            "LABEL": "",
+            "FORMAT": "",
+            "INFORMAT": "",
+        },
+    ]

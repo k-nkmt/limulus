@@ -1,16 +1,12 @@
-from dataclasses import dataclass, field
-from pathlib import Path
+from dataclasses import dataclass, field, replace
 import re
 from typing import Any, Protocol, Sequence
 
-from .models import Diagnostic
-from .native_bridge import load_native_module
-
+from .lark_support import build_lark_parser_from_file
+from .models import Diagnostic, DiagnosticLabel, DiagnosticSpan
 try:
-    from lark import Lark
     from lark.exceptions import UnexpectedInput
 except Exception:  # pragma: no cover
-    Lark = None  # type: ignore[assignment]
     UnexpectedInput = Exception  # type: ignore[assignment]
 
 
@@ -42,6 +38,7 @@ class DatasetReference:
 class ParsedStatement:
     kind: str
     text: str
+    span: DiagnosticSpan | None = None
     dataset_refs: tuple[DatasetReference, ...] = field(default_factory=tuple)
     output_refs: tuple[DatasetReference, ...] = field(default_factory=tuple)
     statement_options: SetStatementOptionSpec = field(default_factory=SetStatementOptionSpec)
@@ -82,6 +79,13 @@ class DataStepAst:
 
 
 @dataclass(frozen=True)
+class StatementRegion:
+    kind: str
+    start: int
+    end: int
+
+
+@dataclass(frozen=True)
 class ParseResult:
     ast: DataStepAst = field(default_factory=DataStepAst)
     diagnostics: tuple[Diagnostic, ...] = field(default_factory=tuple)
@@ -92,12 +96,26 @@ class ParseResult:
 
 
 def statement_to_dict(statement: ParsedStatement) -> dict[str, Any]:
+    span = statement.span
     if_spec = statement.if_spec
     do_spec = statement.do_spec
     array_spec = statement.array_spec
     return {
         "kind": statement.kind,
         "text": statement.text,
+        "span": (
+            {
+                "start": span.start,
+                "end": span.end,
+                "line": span.line,
+                "column": span.column,
+                "end_line": span.end_line,
+                "end_column": span.end_column,
+                "source_id": span.source_id,
+            }
+            if span is not None
+            else None
+        ),
         "dataset_refs": [
             {
                 "name": dataset_ref.name,
@@ -213,14 +231,14 @@ class LarkParserService:
         "informat_stmt": "SKIPPED",
         "call_stmt": "SKIPPED",
     }
-    _DO_TO_STATEMENT = re.compile(r"^do\s+([A-Za-z_][\w\.]*)\s*=\s*(.+?)\s+to\s+(.+)$", re.IGNORECASE)
-    _ARRAY_DECLARATION = re.compile(
-        r"^array\s+([A-Za-z_][\w\.]*)\s*(\[[^\]]+\])?\s+(\$\s+)?(.+)$",
-        re.IGNORECASE,
-    )
-
     def __init__(self) -> None:
         self._lark_parser = self._build_lark_parser()
+        self._label_pairs_parser = build_lark_parser_from_file("label_pairs.lark")
+        self._if_structured_parser = build_lark_parser_from_file("if_structured.lark")
+        self._rename_pairs_parser = build_lark_parser_from_file("rename_pairs.lark")
+        self._assignment_token_parser = build_lark_parser_from_file("assignment_token.lark")
+        self._do_loop_parser = build_lark_parser_from_file("do_loop.lark")
+        self._array_declaration_parser = build_lark_parser_from_file("array_declaration.lark")
 
     def parse(self, dsl_text: str) -> ParseResult:
         segments, syntax_diagnostic = self._extract_statement_segments(dsl_text)
@@ -231,38 +249,28 @@ class LarkParserService:
         statements: list[ParsedStatement] = []
 
         for index, (kind, segment, variant, rule_node) in enumerate(segments, start=1):
+            statement_span = self._span_from_meta(dsl_text, getattr(rule_node, "meta", None))
 
             if kind == "DATA":
                 dataset_ref_specs = self._extract_dataset_ref_specs(
                     dsl_text=dsl_text,
                     rule_node=rule_node,
                 )
-                dataset_tokens = self._extract_ordered_rule_texts(
-                    dsl_text=dsl_text,
-                    rule_node=rule_node,
-                    rule_names={"dataset_ref"},
-                )
                 statement, diagnostic = self._parse_data_statement(
                     segment,
                     index,
-                    dataset_tokens=dataset_tokens,
                     dataset_ref_specs=dataset_ref_specs,
                 )
                 if diagnostic is not None:
-                    diagnostics.append(diagnostic)
+                    diagnostics.append(self._attach_statement_context(diagnostic, dsl_text=dsl_text, span=statement_span))
                     continue
-                statements.append(statement)
+                statements.append(replace(statement, span=statement_span))
                 continue
 
             if kind in {"SET", "MERGE"}:
                 dataset_ref_specs = self._extract_dataset_ref_specs(
                     dsl_text=dsl_text,
                     rule_node=rule_node,
-                )
-                dataset_tokens = self._extract_ordered_rule_texts(
-                    dsl_text=dsl_text,
-                    rule_node=rule_node,
-                    rule_names={"dataset_ref"},
                 )
                 statement_tokens = self._extract_ordered_rule_texts(
                     dsl_text=dsl_text,
@@ -273,30 +281,29 @@ class LarkParserService:
                     kind,
                     segment,
                     index,
-                    dataset_tokens=dataset_tokens,
                     statement_tokens=statement_tokens,
                     dataset_ref_specs=dataset_ref_specs,
                 )
                 if diagnostic is not None:
-                    diagnostics.append(diagnostic)
+                    diagnostics.append(self._attach_statement_context(diagnostic, dsl_text=dsl_text, span=statement_span))
                     continue
-                statements.append(statement)
+                statements.append(replace(statement, span=statement_span))
                 continue
 
             if kind == "RENAME":
                 statement, diagnostic = self._parse_rename_statement(segment, index)
                 if diagnostic is not None:
-                    diagnostics.append(diagnostic)
+                    diagnostics.append(self._attach_statement_context(diagnostic, dsl_text=dsl_text, span=statement_span))
                     continue
-                statements.append(statement)
+                statements.append(replace(statement, span=statement_span))
                 continue
 
             if kind == "LABEL":
                 statement, diagnostic = self._parse_label_statement(segment, index)
                 if diagnostic is not None:
-                    diagnostics.append(diagnostic)
+                    diagnostics.append(self._attach_statement_context(diagnostic, dsl_text=dsl_text, span=statement_span))
                     continue
-                statements.append(statement)
+                statements.append(replace(statement, span=statement_span))
                 continue
 
             if kind in {"IF", "ELSE IF"}:
@@ -304,6 +311,7 @@ class LarkParserService:
                     ParsedStatement(
                         kind=kind,
                         text=segment,
+                        span=statement_span,
                         if_spec=self._parse_if_statement_spec(segment, kind, variant),
                     )
                 )
@@ -314,6 +322,7 @@ class LarkParserService:
                     ParsedStatement(
                         kind=kind,
                         text=segment,
+                        span=statement_span,
                         do_spec=self._parse_do_statement_spec(segment),
                     )
                 )
@@ -324,61 +333,68 @@ class LarkParserService:
                     ParsedStatement(
                         kind=kind,
                         text=segment,
+                        span=statement_span,
                         array_spec=self._parse_array_statement_spec(segment),
                     )
                 )
                 continue
 
-            statements.append(ParsedStatement(kind=kind, text=segment))
+            statements.append(ParsedStatement(kind=kind, text=segment, span=statement_span))
 
         if diagnostics:
             return ParseResult(diagnostics=tuple(diagnostics))
 
         return ParseResult(ast=DataStepAst(statements=tuple(statements)))
 
+    def extract_statement_regions(self, dsl_text: str) -> tuple[StatementRegion, ...] | None:
+        segments, syntax_diagnostic = self._extract_statement_segments(dsl_text)
+        if syntax_diagnostic is not None:
+            return None
+
+        regions: list[StatementRegion] = []
+        for kind, _, _, rule_node in segments:
+            node_meta = getattr(rule_node, "meta", None)
+            if node_meta is None:
+                continue
+            start = max(getattr(node_meta, "start_pos", 0), 0)
+            end = max(getattr(node_meta, "end_pos", start), start)
+            regions.append(StatementRegion(kind=kind, start=start, end=end))
+        return tuple(regions)
+
     def _parse_data_statement(
         self,
         segment: str,
         statement_index: int,
-        dataset_tokens: list[str] | None = None,
         dataset_ref_specs: list[tuple[str, tuple[str, ...]]] | None = None,
     ) -> tuple[ParsedStatement, Diagnostic | None]:
         body = segment[len("data") :].strip()
         if not body:
             return ParsedStatement(kind="DATA", text=segment), None
 
+        if not dataset_ref_specs:
+            return ParsedStatement(kind="DATA", text=segment), Diagnostic(
+                code="PARSE_UNSUPPORTED_STATEMENT",
+                severity="error",
+                location=f"statement:{statement_index}",
+                message=f"Unable to resolve DATA output dataset references: {segment}",
+            )
+
         output_refs: list[DatasetReference] = []
-        if dataset_ref_specs:
-            for dataset_name, option_tokens in dataset_ref_specs:
-                parsed_ref, diagnostic = self._parse_dataset_reference_from_parts(
-                    dataset_name=dataset_name,
-                    option_tokens=option_tokens,
-                    statement_index=statement_index,
-                )
-                if diagnostic is not None:
-                    return ParsedStatement(kind="DATA", text=segment), diagnostic
-                output_refs.append(parsed_ref)
-        else:
-            tokens = dataset_tokens if dataset_tokens else self._normalize_equals_tokens(self._split_top_level_tokens(body))
-            for token in tokens:
-                parsed_ref, diagnostic = self._parse_dataset_reference(token, statement_index)
-                if diagnostic is not None:
-                    return ParsedStatement(kind="DATA", text=segment), diagnostic
-                output_refs.append(parsed_ref)
+        for dataset_name, option_tokens in dataset_ref_specs:
+            parsed_ref, diagnostic = self._parse_dataset_reference_from_parts(
+                dataset_name=dataset_name,
+                option_tokens=option_tokens,
+                statement_index=statement_index,
+            )
+            if diagnostic is not None:
+                return ParsedStatement(kind="DATA", text=segment), diagnostic
+            output_refs.append(parsed_ref)
 
         refs = tuple(output_refs)
         return ParsedStatement(kind="DATA", text=segment, dataset_refs=refs, output_refs=refs), None
 
     def _build_lark_parser(self):
-        if Lark is None:
-            return None
-
-        grammar_path = Path(__file__).with_name("grammar") / "datastep.lark"
-        try:
-            grammar = grammar_path.read_text(encoding="utf-8")
-            return Lark(grammar, start="start", parser="lalr", propagate_positions=True)
-        except Exception:
-            return None
+        return build_lark_parser_from_file("datastep.lark")
 
     def _extract_statement_segments(
         self,
@@ -402,6 +418,9 @@ class LarkParserService:
                 rule_node = children[0]
                 rule_name = str(getattr(rule_node, "data", ""))
                 variant_name = rule_name
+                node_meta = getattr(rule_node, "meta", None)
+                if node_meta is None:
+                    node_meta = getattr(statement_node, "meta", None)
                 nested_children = getattr(rule_node, "children", ())
                 if len(nested_children) == 1 and hasattr(nested_children[0], "data"):
                     nested_rule = str(getattr(nested_children[0], "data", ""))
@@ -411,16 +430,17 @@ class LarkParserService:
                 if kind is None:
                     kind = self._RULE_KIND_MAP.get(rule_name)
                 if kind is None:
+                    span = self._span_from_meta(dsl_text, node_meta)
                     return [], Diagnostic(
                         code="PARSE_UNSUPPORTED_STATEMENT",
                         severity="error",
                         location=f"statement:{index}",
                         message=f"Unsupported statement syntax: {rule_name}",
+                        span=span,
+                        labels=((DiagnosticLabel(span=span, message="unsupported statement"),) if span is not None else ()),
+                        source_text=dsl_text,
                     )
 
-                node_meta = getattr(rule_node, "meta", None)
-                if node_meta is None:
-                    node_meta = getattr(statement_node, "meta", None)
                 start = getattr(node_meta, "start_pos", 0)
                 end = getattr(node_meta, "end_pos", start)
                 text = dsl_text[start:end].strip()
@@ -434,19 +454,89 @@ class LarkParserService:
             column = getattr(error, "column", 1)
             statement_index = dsl_text[:position].count(";") + 1
             message = f"Unsupported statement syntax near line {line}, column {column}."
+            span = self._span_from_unexpected_input(dsl_text, error)
             return [], Diagnostic(
                 code="PARSE_UNSUPPORTED_STATEMENT",
                 severity="error",
                 location=f"statement:{statement_index}",
                 message=message,
+                span=span,
+                labels=((DiagnosticLabel(span=span, message="syntax error"),) if span is not None else ()),
+                source_text=dsl_text,
             )
+
+    def _span_from_meta(self, dsl_text: str, node_meta: Any | None) -> DiagnosticSpan | None:
+        if node_meta is None:
+            return None
+        start = getattr(node_meta, "start_pos", None)
+        end = getattr(node_meta, "end_pos", None)
+        line = getattr(node_meta, "line", None)
+        column = getattr(node_meta, "column", None)
+        end_line = getattr(node_meta, "end_line", None)
+        end_column = getattr(node_meta, "end_column", None)
+        if start is None or end is None or line is None or column is None:
+            return None
+        end_position = max(end, start + 1)
+        return DiagnosticSpan(
+            start=max(start, 0),
+            end=end_position,
+            line=max(line, 1),
+            column=max(column, 1),
+            end_line=end_line,
+            end_column=end_column,
+            source_id="<dsl>",
+        )
+
+    def _span_from_unexpected_input(self, dsl_text: str, error: Any) -> DiagnosticSpan:
+        start = max(getattr(error, "pos_in_stream", 0), 0)
+        line = max(getattr(error, "line", 1), 1)
+        column = max(getattr(error, "column", 1), 1)
+        end = self._unexpected_span_end(dsl_text, start)
+        return DiagnosticSpan(
+            start=start,
+            end=end,
+            line=line,
+            column=column,
+            end_line=line,
+            end_column=column + max(end - start, 1),
+            source_id="<dsl>",
+        )
+
+    def _unexpected_span_end(self, dsl_text: str, start: int) -> int:
+        if start >= len(dsl_text):
+            return start + 1
+        match = re.match(r"[^\s;]+", dsl_text[start:])
+        if match is None:
+            return min(start + 1, len(dsl_text))
+        return start + max(len(match.group(0)), 1)
+
+    def _attach_statement_context(
+        self,
+        diagnostic: Diagnostic,
+        *,
+        dsl_text: str,
+        span: DiagnosticSpan | None,
+    ) -> Diagnostic:
+        labels = diagnostic.labels
+        if not labels and span is not None:
+            labels = (DiagnosticLabel(span=span, message="statement"),)
+        return Diagnostic(
+            code=diagnostic.code,
+            severity=diagnostic.severity,
+            message=diagnostic.message,
+            location=diagnostic.location,
+            stage=diagnostic.stage,
+            span=diagnostic.span or span,
+            labels=labels,
+            notes=diagnostic.notes,
+            source_text=diagnostic.source_text or dsl_text,
+        )
 
     def _parse_data_source_statement(
         self,
         kind: str,
         segment: str,
         statement_index: int,
-        dataset_tokens: list[str] | None = None,
         statement_tokens: list[str] | None = None,
         dataset_ref_specs: list[tuple[str, tuple[str, ...]]] | None = None,
     ) -> tuple[ParsedStatement, Diagnostic | None]:
@@ -458,21 +548,14 @@ class LarkParserService:
                 None,
             )
 
-        if dataset_ref_specs:
-            tokens = []
-        elif dataset_tokens and kind in {"SET", "MERGE"}:
-            tokens = list(dataset_tokens)
-        else:
-            tokens = self._split_top_level_tokens(body)
-            tokens = self._normalize_equals_tokens(tokens)
         dataset_refs: list[DatasetReference] = []
         statement_options = SetStatementOptionSpec()
 
         for token in statement_tokens or ():
-            option_key_match = re.match(r"^\s*(indsname|end|in)\s*=", token.lower())
-            if option_key_match is None:
+            parsed_token = self._parse_assignment_token(token)
+            if parsed_token is None:
                 continue
-            option_key = option_key_match.group(1)
+            option_key = parsed_token[0].strip().lower()
             if option_key == "indsname" and kind != "SET":
                 return (
                     ParsedStatement(kind=kind, text=segment),
@@ -499,36 +582,6 @@ class LarkParserService:
                     option_tokens=option_tokens,
                     statement_index=statement_index,
                 )
-                if diagnostic is not None:
-                    return ParsedStatement(kind=kind, text=segment), diagnostic
-                dataset_refs.append(parsed_ref)
-        else:
-            for token in tokens:
-                token_lower = token.lower()
-                set_option_match = re.match(r"^\s*(indsname|end|in)\s*=", token_lower)
-                if set_option_match is not None and "(" not in token:
-                    option_key = set_option_match.group(1)
-                    if option_key == "indsname" and kind != "SET":
-                        return (
-                            ParsedStatement(kind=kind, text=segment),
-                            Diagnostic(
-                                code="PARSE_SET_OPTION_SCOPE_ERROR",
-                                severity="error",
-                                location=f"statement:{statement_index}",
-                                message=f"{option_key.upper()}= is only allowed as a SET statement option.",
-                            ),
-                        )
-                    updated, diagnostic = self._parse_set_statement_option_token(
-                        token=token,
-                        existing=statement_options,
-                        statement_index=statement_index,
-                    )
-                    if diagnostic is not None:
-                        return ParsedStatement(kind=kind, text=segment), diagnostic
-                    statement_options = updated
-                    continue
-
-                parsed_ref, diagnostic = self._parse_dataset_reference(token, statement_index)
                 if diagnostic is not None:
                     return ParsedStatement(kind=kind, text=segment), diagnostic
                 dataset_refs.append(parsed_ref)
@@ -647,8 +700,8 @@ class LarkParserService:
         existing: SetStatementOptionSpec,
         statement_index: int,
     ) -> tuple[SetStatementOptionSpec, Diagnostic | None]:
-        match = re.match(r"^\s*([A-Za-z_][\w]*)\s*=\s*(.+?)\s*$", token)
-        if match is None:
+        parsed_token = self._parse_assignment_token(token)
+        if parsed_token is None:
             return existing, Diagnostic(
                 code="PARSE_UNSUPPORTED_STATEMENT",
                 severity="error",
@@ -656,8 +709,7 @@ class LarkParserService:
                 message=f"Unsupported SET statement option: {token}",
             )
 
-        key = match.group(1)
-        value = match.group(2)
+        key, value = parsed_token
         normalized_key = key.strip().lower()
         normalized_value = value.strip()
 
@@ -690,40 +742,6 @@ class LarkParserService:
 
         return SetStatementOptionSpec(indsname_var=existing.indsname_var, end_var=normalized_value), None
 
-    def _parse_dataset_reference(
-        self,
-        token: str,
-        statement_index: int,
-    ) -> tuple[DatasetReference, Diagnostic | None]:
-        if "(" not in token:
-            return DatasetReference(name=token), None
-
-        if not token.endswith(")"):
-            return DatasetReference(name=token), Diagnostic(
-                code="PARSE_UNSUPPORTED_STATEMENT",
-                severity="error",
-                location=f"statement:{statement_index}",
-                message=f"Invalid dataset reference option syntax: {token}",
-            )
-
-        open_index = token.find("(")
-        name = token[:open_index].strip()
-        option_body = token[open_index + 1 : -1].strip()
-
-        options, diagnostic = self._parse_dataset_reference_options(option_body, statement_index)
-        if diagnostic is not None:
-            return DatasetReference(name=name), diagnostic
-
-        return DatasetReference(name=name, options=options), None
-
-    def _parse_dataset_reference_options(
-        self,
-        option_body: str,
-        statement_index: int,
-    ) -> tuple[DatasetReferenceOptionSpec, Diagnostic | None]:
-        tokens = self._normalize_equals_tokens(self._split_top_level_tokens(option_body))
-        return self._parse_dataset_reference_option_tokens(tokens, statement_index)
-
     def _parse_dataset_reference_option_tokens(
         self,
         tokens: Sequence[str],
@@ -740,8 +758,9 @@ class LarkParserService:
         active_collect: str | None = None
 
         for token in tokens:
-            if "=" in token:
-                key, raw_value = token.split("=", maxsplit=1)
+            parsed_token = self._parse_assignment_token(token)
+            if parsed_token is not None:
+                key, raw_value = parsed_token
                 normalized_key = key.strip().lower()
                 value = raw_value.strip()
 
@@ -874,10 +893,32 @@ class LarkParserService:
         if not body:
             return ParsedStatement(kind="LABEL", text=segment), None
 
+        if self._label_pairs_parser is None:
+            return ParsedStatement(kind="LABEL", text=segment), Diagnostic(
+                code="PARSE_UNSUPPORTED_STATEMENT",
+                severity="error",
+                location=f"statement:{statement_index}",
+                message="LABEL parser backend is unavailable.",
+            )
+
+        try:
+            parsed = self._label_pairs_parser.parse(body)
+        except UnexpectedInput:
+            return ParsedStatement(kind="LABEL", text=segment), Diagnostic(
+                code="PARSE_UNSUPPORTED_STATEMENT",
+                severity="error",
+                location=f"statement:{statement_index}",
+                message=f"Unsupported LABEL statement syntax: {segment}",
+            )
+
         label_map: dict[str, str] = {}
-        pattern = re.compile(r'([A-Za-z_][\w\.]*)\s*=\s*("[^"]*"|\'[^\']*\')')
-        for match in pattern.finditer(body):
-            label_map[match.group(1)] = self._strip_quoted_value(match.group(2))
+        for pair in getattr(parsed, "children", ()):
+            if getattr(pair, "data", None) != "label_pair":
+                continue
+            if len(getattr(pair, "children", ())) != 3:
+                continue
+            name_token, _, value_token = pair.children
+            label_map[str(name_token)] = self._strip_quoted_value(str(value_token))
 
         if not label_map:
             return ParsedStatement(kind="LABEL", text=segment), Diagnostic(
@@ -894,17 +935,36 @@ class LarkParserService:
         body: str,
         statement_index: int,
     ) -> tuple[dict[str, str], Diagnostic | None]:
+        if self._rename_pairs_parser is None:
+            return {}, Diagnostic(
+                code="PARSE_RENAME_STATEMENT_INVALID",
+                severity="error",
+                location=f"statement:{statement_index}",
+                message="RENAME parser backend is unavailable.",
+            )
+
+        try:
+            parsed = self._rename_pairs_parser.parse(body)
+        except UnexpectedInput:
+            return {}, Diagnostic(
+                code="PARSE_RENAME_STATEMENT_INVALID",
+                severity="error",
+                location=f"statement:{statement_index}",
+                message=f"Invalid rename mapping: {body}",
+            )
+
         rename_map: dict[str, str] = {}
-        tokens = self._normalize_equals_tokens(self._split_top_level_tokens(body))
-        for token in tokens:
-            if "=" not in token:
+        for pair in getattr(parsed, "children", ()): 
+            if getattr(pair, "data", None) != "rename_pair":
+                continue
+            if len(getattr(pair, "children", ())) != 3:
                 return {}, Diagnostic(
                     code="PARSE_RENAME_STATEMENT_INVALID",
                     severity="error",
                     location=f"statement:{statement_index}",
-                    message=f"Invalid rename mapping: {token}",
+                    message=f"Invalid rename mapping: {body}",
                 )
-            old_name, new_name = token.split("=", maxsplit=1)
+            old_name, _, new_name = pair.children
             normalized_old = old_name.strip()
             normalized_new = new_name.strip()
             if not normalized_old or not normalized_new:
@@ -912,7 +972,7 @@ class LarkParserService:
                     code="PARSE_RENAME_STATEMENT_INVALID",
                     severity="error",
                     location=f"statement:{statement_index}",
-                    message=f"Invalid rename mapping: {token}",
+                    message=f"Invalid rename mapping: {body}",
                 )
             rename_map[normalized_old] = normalized_new
         return rename_map, None
@@ -923,97 +983,39 @@ class LarkParserService:
             return normalized[1:-1]
         return normalized
 
-    def _split_top_level_tokens(self, text: str) -> list[str]:
-        tokens: list[str] = []
-        current: list[str] = []
-        depth = 0
-
-        for char in text:
-            if char == "(":
-                depth += 1
-                current.append(char)
-                continue
-            if char == ")":
-                depth -= 1
-                current.append(char)
-                continue
-            if char.isspace() and depth == 0:
-                if current:
-                    tokens.append("".join(current))
-                    current = []
-                continue
-            current.append(char)
-
-        if current:
-            tokens.append("".join(current))
-
-        return [token for token in tokens if token]
-
-    def _normalize_equals_tokens(self, tokens: list[str]) -> list[str]:
-        normalized: list[str] = []
-        index = 0
-
-        while index < len(tokens):
-            token = tokens[index].strip()
-            if not token:
-                index += 1
-                continue
-
-            if token == "=" and normalized and index + 1 < len(tokens):
-                previous = normalized.pop().strip()
-                next_token = tokens[index + 1].strip()
-                normalized.append(f"{previous}={next_token}")
-                index += 2
-                continue
-
-            if token.endswith("=") and index + 1 < len(tokens):
-                next_token = tokens[index + 1].strip()
-                normalized.append(f"{token}{next_token}")
-                index += 2
-                continue
-
-            if token.startswith("=") and normalized:
-                previous = normalized.pop().strip()
-                normalized.append(f"{previous}{token}")
-                index += 1
-                continue
-
-            normalized.append(token)
-            index += 1
-
-        return normalized
-
     def _parse_if_statement_spec(self, segment: str, kind: str, variant: str) -> IfStatementSpec | None:
-        keyword = "else if" if kind == "ELSE IF" else "if"
-        lowered_segment = segment.lower()
-        prefix = f"{keyword} "
-        if not lowered_segment.startswith(prefix):
+        if self._if_structured_parser is None:
             return None
 
-        body = segment[len(prefix) :].strip()
-        if not body:
-            return None
-
-        if variant == "subset_if_stmt":
-            condition = self._normalize_if_expression(body)
-            if not condition:
+        source_text = segment.strip()
+        parse_source = source_text
+        if kind == "ELSE IF":
+            lowered = parse_source.lower()
+            if not lowered.startswith("else "):
                 return None
+            parse_source = parse_source[4:].strip()
+
+        try:
+            parsed = self._if_structured_parser.parse(parse_source)
+        except UnexpectedInput:
+            return None
+
+        root = self._root_tree(parsed, "if_stmt")
+        children = list(getattr(root, "children", ()))
+        if len(children) < 2:
+            return None
+
+        condition_node = children[1]
+        condition = self._normalize_if_expression(parse_source, condition_node)
+        if not condition:
+            return None
+
+        if len(children) == 2:
             return IfStatementSpec(condition=condition, is_subset=True)
 
-        lowered_body = body.lower()
-        then_index = lowered_body.find(" then ")
-        if then_index < 0:
-            condition = self._normalize_if_expression(body)
-            if not condition:
-                return None
-            return IfStatementSpec(condition=condition, is_subset=True)
-
-        raw_condition = body[:then_index].strip()
-        action = body[then_index + len(" then ") :].strip()
-        if not raw_condition or not action:
+        action = self._slice_node_text(parse_source, children[3]) if len(children) >= 4 else ""
+        if not action:
             return None
-
-        condition = self._normalize_if_expression(raw_condition)
         return IfStatementSpec(
             condition=condition,
             then_action=action,
@@ -1021,74 +1023,198 @@ class LarkParserService:
             is_then_do=(variant in {"if_then_do_stmt", "else_if_then_do_stmt"} or action.lower() == "do"),
         )
 
-    def _normalize_if_expression(self, expression: str) -> str:
-        normalized = expression.strip()
-        normalized = re.sub(r"\bEQ\b", "==", normalized, flags=re.IGNORECASE)
-        normalized = re.sub(r"\bNE\b", "!=", normalized, flags=re.IGNORECASE)
-        normalized = re.sub(r"\bGT\b", ">", normalized, flags=re.IGNORECASE)
-        normalized = re.sub(r"\bLT\b", "<", normalized, flags=re.IGNORECASE)
-        normalized = re.sub(r"\bGE\b", ">=", normalized, flags=re.IGNORECASE)
-        normalized = re.sub(r"\bLE\b", "<=", normalized, flags=re.IGNORECASE)
-        normalized = re.sub(r"\bAND\b", "and", normalized, flags=re.IGNORECASE)
-        normalized = re.sub(r"\bOR\b", "or", normalized, flags=re.IGNORECASE)
-        normalized = re.sub(r"\bNOT\b", "not", normalized, flags=re.IGNORECASE)
-        normalized = normalized.replace("^=", "!=")
-        return re.sub(r"(?<![<>!])=(?!=)", "==", normalized)
+    def _normalize_if_expression(self, source_text: str, condition_node: Any) -> str:
+        start = getattr(getattr(condition_node, "meta", None), "start_pos", None)
+        end = getattr(getattr(condition_node, "meta", None), "end_pos", None)
+        if not isinstance(start, int) or not isinstance(end, int) or end < start:
+            return self._slice_node_text(source_text, condition_node)
+
+        tokens = self._collect_tokens(condition_node)
+        if not tokens:
+            return source_text[start:end].strip()
+
+        normalized_parts: list[str] = []
+        cursor = start
+        for token in sorted(tokens, key=lambda item: getattr(item, "start_pos", 0)):
+            token_start = getattr(token, "start_pos", cursor)
+            token_end = getattr(token, "end_pos", token_start)
+            normalized_parts.append(source_text[cursor:token_start])
+            normalized_parts.append(self._normalize_if_token_text(token))
+            cursor = token_end
+        normalized_parts.append(source_text[cursor:end])
+        return "".join(normalized_parts).strip()
+
+    def _collect_tokens(self, node: Any) -> list[Any]:
+        tokens: list[Any] = []
+        for child in getattr(node, "children", ()):
+            if hasattr(child, "children"):
+                tokens.extend(self._collect_tokens(child))
+                continue
+            tokens.append(child)
+        return tokens
+
+    @staticmethod
+    def _normalize_if_token_text(token: Any) -> str:
+        token_type = getattr(token, "type", "")
+        token_text = str(token)
+        if token_type == "COMPARE_WORD":
+            mapping = {
+                "eq": "==",
+                "ne": "!=",
+                "gt": ">",
+                "lt": "<",
+                "ge": ">=",
+                "le": "<=",
+            }
+            return mapping.get(token_text.lower(), token_text)
+        if token_type == "BOOL_WORD":
+            return token_text.lower()
+        if token_type == "SYMBOL_OP":
+            if token_text == "=":
+                return "=="
+            if token_text in {"^=", "~=", "¬="}:
+                return "!="
+        return token_text
 
     def _parse_do_statement_spec(self, segment: str) -> DoStatementSpec | None:
-        matched = self._DO_TO_STATEMENT.match(segment.strip())
-        if matched is None:
+        if self._do_loop_parser is None:
+            return None
+
+        source_text = segment.strip()
+        try:
+            parsed = self._do_loop_parser.parse(source_text)
+        except UnexpectedInput:
+            return None
+
+        root = self._root_tree(parsed, "do_stmt")
+        children = list(getattr(root, "children", ()))
+        if len(children) != 6:
             return None
         return DoStatementSpec(
-            loop_var=matched.group(1),
-            start_expr=matched.group(2).strip(),
-            end_expr=matched.group(3).strip(),
+            loop_var=str(children[1]),
+            start_expr=self._slice_node_text(source_text, children[3]),
+            end_expr=self._slice_node_text(source_text, children[5]),
         )
 
     def _parse_array_statement_spec(self, segment: str) -> ArrayStatementSpec | None:
-        matched = self._ARRAY_DECLARATION.match(segment.strip())
-        if matched is None:
+        if self._array_declaration_parser is None:
             return None
 
-        array_name = matched.group(1)
-        dimension_token = matched.group(2).strip() if matched.group(2) else None
-        character_array = bool(matched.group(3))
-        remainder = matched.group(4).strip()
-        tokens = [token for token in remainder.split() if token]
-        if not tokens:
+        try:
+            parsed = self._array_declaration_parser.parse(segment.strip())
+        except UnexpectedInput:
+            return None
+
+        root = self._root_tree(parsed, "array_stmt")
+        children = list(getattr(root, "children", ()))
+        if len(children) < 3:
             return None
 
         declared_size: int | None = None
         wildcard_size = False
-        if dimension_token is not None:
-            if re.match(r"^\[\s*\*\s*\]$", dimension_token):
+        character_array = False
+        variables: tuple[str, ...] = ()
+        for child in children[2:]:
+            child_data = getattr(child, "data", None)
+            if child_data == "wildcard_size":
                 wildcard_size = True
-            elif re.match(r"^\[\s*\d+\s*\]$", dimension_token):
-                declared_size = int(dimension_token.strip("[] "))
-        else:
-            first = tokens[0]
-            if re.match(r"^\[\s*\*\s*\]$", first):
-                wildcard_size = True
-                tokens = tokens[1:]
-            elif re.match(r"^\[\s*\d+\s*\]$", first):
-                declared_size = int(first.strip("[] "))
-                tokens = tokens[1:]
-            elif re.match(r"^\d+$", first):
-                declared_size = int(first)
-                tokens = tokens[1:]
+                continue
+            if child_data == "bracket_size":
+                declared_size = int(str(child.children[0]).strip("[] "))
+                continue
+            if child_data == "numeric_size":
+                declared_size = int(str(child.children[0]))
+                continue
+            if child_data == "character_array":
+                character_array = True
+                continue
+            if child_data == "variable_list":
+                variables = tuple(str(token) for token in child.children)
 
-        variables = tuple(tokens)
         if not variables:
             return None
 
         return ArrayStatementSpec(
-            array_name=array_name,
+            array_name=str(children[1]),
             variables=variables,
             declared_size=declared_size,
             wildcard_size=wildcard_size,
             character_array=character_array,
         )
 
+    def _parse_assignment_token(self, token: str) -> tuple[str, str] | None:
+        if self._assignment_token_parser is None:
+            return None
+
+        try:
+            parsed = self._assignment_token_parser.parse(token)
+        except UnexpectedInput:
+            return None
+
+        root = self._root_tree(parsed, "assignment_token")
+        children = list(getattr(root, "children", ()))
+        if len(children) != 3:
+            return None
+        return str(children[0]), str(children[2]).strip()
+
+    @staticmethod
+    def _root_tree(parsed: Any, expected: str) -> Any:
+        if getattr(parsed, "data", None) == expected:
+            return parsed
+        children = getattr(parsed, "children", ())
+        if children and getattr(children[0], "data", None) == expected:
+            return children[0]
+        return parsed
+
+    @staticmethod
+    def _slice_node_text(source_text: str, node: Any) -> str:
+        node_meta = getattr(node, "meta", None)
+        start = getattr(node_meta, "start_pos", None)
+        end = getattr(node_meta, "end_pos", None)
+        if isinstance(start, int) and isinstance(end, int) and end >= start:
+            return source_text[start:end].strip()
+        return str(node).strip()
+
+
+class SplitStageParserService:
+    _RULE_KIND_MAP: dict[str, str] = {
+        "data_stmt": "DATA",
+        "run_stmt": "RUN",
+        "skip_stmt": "SKIP",
+        "other_stmt": "OTHER",
+    }
+
+    def __init__(self) -> None:
+        self._lark_parser = build_lark_parser_from_file("datastep_split.lark")
+
+    def extract_statement_regions(self, dsl_text: str) -> tuple[StatementRegion, ...] | None:
+        if self._lark_parser is None:
+            return None
+
+        try:
+            tree = self._lark_parser.parse(dsl_text)
+        except UnexpectedInput:
+            return None
+
+        regions: list[StatementRegion] = []
+        for statement_node in getattr(tree, "children", ()): 
+            children = getattr(statement_node, "children", ())
+            if not children:
+                continue
+            rule_node = children[0]
+            rule_name = str(getattr(rule_node, "data", ""))
+            kind = self._RULE_KIND_MAP.get(rule_name)
+            if kind is None:
+                continue
+            node_meta = getattr(rule_node, "meta", None)
+            if node_meta is None:
+                node_meta = getattr(statement_node, "meta", None)
+            if node_meta is None:
+                continue
+            start = max(getattr(node_meta, "start_pos", 0), 0)
+            end = max(getattr(node_meta, "end_pos", start), start)
+            regions.append(StatementRegion(kind=kind, start=start, end=end))
+        return tuple(regions)
 
 @dataclass(frozen=True)
 class ParserExecutionContext:
@@ -1149,59 +1275,7 @@ class RustNativeParserBackend:
                     )
                 )
 
-        native_module, _import_error = load_native_module()
-        if native_module is None:
-            return result
-
-        try:
-            native_result = native_module.parse_subset(context.dsl_text)
-        except Exception as error:
-            return ParseResult(
-                diagnostics=(
-                    Diagnostic(
-                        code="PARSE_RUST_NATIVE_EXECUTION_FAILED",
-                        severity="error",
-                        location="",
-                        message=f"Rust native parser execution failed: {error}",
-                    ),
-                )
-            )
-
-        native_diagnostics = self._extract_native_diagnostics(native_result)
-        if native_diagnostics:
-            return ParseResult(diagnostics=tuple(native_diagnostics))
-
         return result
-
-    def _extract_native_diagnostics(self, native_result: Any) -> list[Diagnostic]:
-        if not isinstance(native_result, dict):
-            return [
-                Diagnostic(
-                    code="PARSE_RUST_NATIVE_EXECUTION_FAILED",
-                    severity="error",
-                    location="",
-                    message="Rust native parser returned invalid result type.",
-                )
-            ]
-
-        raw = native_result.get("diagnostics", [])
-        if not isinstance(raw, list):
-            return []
-
-        diagnostics: list[Diagnostic] = []
-        for item in raw:
-            if not isinstance(item, dict):
-                continue
-            diagnostics.append(
-                Diagnostic(
-                    code=str(item.get("code", "PARSE_BACKEND_CAPABILITY_MISSING")),
-                    severity=str(item.get("severity", "error")),
-                    location=str(item.get("location", "")),
-                    message=str(item.get("message", "Rust native parser returned diagnostic.")),
-                )
-            )
-        return diagnostics
-
 
 class ParserBackendSelector:
     def __init__(self, python_backend: ParserBackend, rust_backend: ParserBackend) -> None:

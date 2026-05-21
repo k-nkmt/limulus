@@ -39,7 +39,22 @@ Some row-oriented execution paths materialize rows before the final Arrow table 
 If exact physical types matter, it is recommended to perform type conversion at the final materialized output stage. In practice, prefer `DatasetView.cast(...)` or `DatasetView.astype(...)` as the last transformation before using the result.
 
 ### SQL API
-`Session.sql()` is available for read-oriented queries and `CREATE TABLE ... AS ...` style result persistence. The feature is backed by the Polars SQL engine and is intended as a practical session-level query helper rather than a full PROC SQL reimplementation.
+`Session.sql()` is available for read-oriented queries, `CREATE TABLE ... AS ...` style result persistence, and `DROP TABLE ...` dataset removal. The feature is backed by the Polars SQL engine and is intended as a practical session-level query helper rather than a full PROC SQL reimplementation.
+
+`dictionary.tables` and `dictionary.columns` are available in SQL. limulus also registers `dictionary_tables` and `dictionary_columns` aliases because some SQL engines treat dotted names as schema-qualified identifiers.
+
+### Dictionary Tables
+Dictionary metadata is generated dynamically from Arrow schema metadata rather than from a separate catalog store.
+
+- `MEMLABEL` comes from table schema metadata key `memlabel`
+- `LABEL` comes from per-field metadata key `label`
+- `TYPE` reports the Arrow type string such as `int64` or `string`
+- `LENGTH` is not exposed in `dictionary.columns`
+
+This means the metadata contract is Arrow-centric even when the API shape follows DICTIONARY-style naming.
+
+### Name Resolution
+Dataset names are case-insensitive, and a `work.` prefix is stripped during lookup. Column-oriented Session / DatasetView helpers also resolve column names case-insensitively when the match is unique.
 
 ### Transpose / Assign API
 `Session.transpose()` / `DatasetView.transpose()` and `Session.assign()` / `DatasetView.assign()` are Python-side column APIs rather than DATA step statements.
@@ -54,7 +69,37 @@ Current transpose scope is intentionally narrow:
 
 For `assign()`, string values are interpreted as expressions. To assign a string literal, quote it inside the expression, for example `flag="'A'"`.
 
-The current `assign()` implementation still materializes rows and evaluates expressions row by row in Python. The API boundary is intended to support a future column-oriented implementation, but the current release should not be treated as a guaranteed high-performance path.
+`assign()` is now executed through a column-oriented expression pipeline. v04 currently guarantees column-oriented execution for literals, arithmetic / comparison expressions, `case when`, and the built-in function subset `upcase`, `lowcase`, `propcase`, `cat`, `cats`, `catt`, `catx`, `index`, `find`, `tranwrd`, `translate`, `length`, `lengthn`, `strip`, `reverse`, `repeat`, `countw`, `round`, `put`, `input`, and `hour`. Unsupported functions fail explicitly instead of falling back to row-wise Python evaluation.
+
+### PUT / INPUT Scope
+limulus now provides a limited `put(...)` / `input(...)` helper surface in both helper expressions and the Python runtime.
+
+Current built-in families are:
+
+- numeric to text: `best.`, `w.`, `w.d`, `w.d.`, `zw.`, `zw.d`, `zw.d.`, `commaw.`, `commaw.d`, `commaw.d.`
+- text to numeric: `best.`
+- text to date / datetime / time: `e8601da.`, `e8601dt.`, `yymmdd6.`, `yymmdd8.`, `yymmdd10.`, `time.`
+- date / datetime / time to text: `e8601da.`, `e8601dt.`, `time.`
+- decimal-hour extraction: `hour(...)`
+
+`input(...)` returns Python / Arrow-compatible numeric, `date`, `datetime`, and `time` values rather than date/time numeric values. This is intentionally a practical subset, not a full format catalog.
+
+`Session.register_format(...)` and `Session.register_informat(..., kind=...)` extend the shared session registry used by helper expressions and the Python runtime. This is a Python-side extension hook, not a full replacement for format catalogs.
+
+### PROC / Macro Skip Scope
+Some unsupported syntax is skipped before Data Step parsing so mixed legacy source can still be processed.
+
+Skipped forms:
+
+- `%let ...;`
+- `%put ...;`
+- `%* ...;`
+- `%macro ... %mend;`
+- `%macro ... %mend name;`
+- `proc ... run;`
+- `proc ... quit;`
+
+Skipped syntax is ignored rather than executed. Macro variable expansion, open-code macros, and procedure semantics remain unsupported.
 
 ### length
 Character length is variable by default, so no character truncation occurs.
@@ -115,9 +160,10 @@ Useful for extending functionality not covered by limulus's built-in functions, 
 | SAS language Feature | Notes |
 |---------|------|
 | Attrib | Full ATTRIB parity is not implemented yet; use dataset labels and LABEL statements for supported metadata cases |
-| Numeric format (`PUT(x, 8.2)`) | Planned for future implementation; `apply` can be used as a workaround |
-| Format (`FORMAT`, `INFORMAT`) | Handle with if statements and merge; to be revisited |
-| Macro variables (`%let`, `&var`) | Planned; use Python f-string as an alternative |
+| Numeric format (`PUT(x, 8.2.)`) | Limited built-in `put(...)` support is available for `w.d.`, `commaw.d.`, and `zN`; the broader format catalog is not implemented |
+| Format (`FORMAT`, `INFORMAT`) | Python-side registry hooks are available for advanced usage |
+| Macro variables (`%let`, `&var`) | `%let` / `%put` / `%macro ... %mend` are skipped, not executed; `&var` expansion is not implemented |
+| PROC statements | `proc ... run;` / `proc ... quit;` blocks are skipped so surrounding DATA steps can still be parsed, but procedure semantics are not implemented |
 | `INFILE` / `FILE` | Not planned; handle on the Python side |
 | `INPUT` / `DATALINES` | Not planned; handle on the Python side |
 | Colon-based options (`=:`, `aa:`) | Workarounds available; under consideration |
@@ -125,7 +171,7 @@ Useful for extending functionality not covered by limulus's built-in functions, 
 | Variable groups (`_numeric_`, `_character_`, `_all_`) | Workarounds available; under consideration |
 | Character operators (e.g., `eq`) | May be implemented if there is demand |
 | CALL subroutines | `symputx` and `missing` are planned |
-| Dictionary tables | Planned for future implementation |
+| Dictionary tables | Supported for `tables` / `columns`; metadata comes from Arrow schema/field metadata |
 
 In general, features that have no practical workaround and are commonly used will be prioritized.  
 For features that are costly to implement and have good Python-side alternatives, those alternatives are recommended instead, freeing resources for areas like performance.  
@@ -154,5 +200,4 @@ session.dataset("ds").select(["x","y"])
 
 - [ ] `%LET` macro variables → Python variables + f-string to build DSL strings
 - [ ] `INFILE` → pass Polars / Pandas to `session.loads()`
-- [ ] `FORMAT` → handle with if statements and merge
 - [ ] Missing value checks → use `missing()` function or `cmiss()|nmiss()`

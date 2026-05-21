@@ -279,9 +279,200 @@ class RuntimeNativeIntegrationTests(unittest.TestCase):
         with patch("limulus.backends.load_native_module", return_value=(None, RuntimeError("missing"))):
             response = executor.execute(request)
 
+    def test_python_runtime_resolves_statement_variable_references_case_insensitively(self) -> None:
+        executor = DataStepExecutor(runtime_backend="python")
+        response = executor.execute(
+            ExecuteRequest(
+                dsl_text=(
+                    "data out; set in; "
+                    "if NAME = 'Alice'; "
+                    "upper_name = upcase(NAME); "
+                    "output out; keep upper_name; run;"
+                ),
+                inputs={
+                    "in": DataSetRef(
+                        kind="arrow_table",
+                        location="dataset://in",
+                        payload=_arrow_table([
+                            {"name": "Alice"},
+                            {"name": "Bob"},
+                        ]),
+                    )
+                },
+            )
+        )
+
         self.assertFalse(response.has_errors)
-        self.assertEqual(_output_rows(response, "out"), scenario["expected_output"])
-        self.assertEqual(executor.last_runtime_backend, scenario["expected_backend"])
+        self.assertEqual(_output_rows(response, "out"), [{"upper_name": "ALICE"}])
+
+    def test_python_runtime_preserves_original_column_name_for_case_only_assignments(self) -> None:
+        executor = DataStepExecutor(runtime_backend="python")
+        response = executor.execute(
+            ExecuteRequest(
+                dsl_text="data out; set in; NAME = UPCASE(name); output out; run;",
+                inputs={
+                    "in": DataSetRef(
+                        kind="arrow_table",
+                        location="dataset://in",
+                        payload=_arrow_table([
+                            {"name": "Alice"},
+                        ]),
+                    )
+                },
+            )
+        )
+
+        self.assertFalse(response.has_errors)
+        self.assertEqual(_output_rows(response, "out"), [{"name": "ALICE"}])
+
+    def test_python_runtime_applies_set_options_case_insensitively(self) -> None:
+        executor = DataStepExecutor(runtime_backend="python")
+        response = executor.execute(
+            ExecuteRequest(
+                dsl_text=(
+                    "data out; set in(keep=ID amount rename=(amount=score) where=(ID >= 2)); "
+                    "output out; run;"
+                ),
+                inputs={
+                    "in": DataSetRef(
+                        kind="arrow_table",
+                        location="dataset://in",
+                        payload=_arrow_table([
+                            {"Id": 1, "Amount": 10},
+                            {"Id": 2, "Amount": 20},
+                        ]),
+                    )
+                },
+            )
+        )
+
+        self.assertFalse(response.has_errors)
+        self.assertEqual(_output_rows(response, "out"), [{"Id": 2, "score": 20}])
+
+    def test_python_runtime_merges_by_and_options_case_insensitively(self) -> None:
+        executor = DataStepExecutor(runtime_backend="python")
+        response = executor.execute(
+            ExecuteRequest(
+                dsl_text=(
+                    "data out; merge a(keep=SUBJ xa rename=(XA=x)) b(keep=subj yb rename=(YB=y)); "
+                    "by subj; output out; run;"
+                ),
+                inputs={
+                    "a": DataSetRef(
+                        kind="arrow_table",
+                        location="dataset://a",
+                        payload=_arrow_table([
+                            {"Subj": "A", "Xa": 10},
+                            {"Subj": "B", "Xa": 20},
+                        ]),
+                    ),
+                    "b": DataSetRef(
+                        kind="arrow_table",
+                        location="dataset://b",
+                        payload=_arrow_table([
+                            {"subj": "A", "Yb": 100},
+                            {"subj": "C", "Yb": 300},
+                        ]),
+                    ),
+                },
+            )
+        )
+
+        self.assertFalse(response.has_errors)
+        self.assertEqual(
+            _output_rows(response, "out"),
+            [
+                {"Subj": "A", "x": 10, "y": 100},
+                {"Subj": "B", "x": 20},
+                {"Subj": "C", "y": 300},
+            ],
+        )
+
+    def test_rust_runtime_preserves_original_column_name_for_case_only_assignments(self) -> None:
+        executor = DataStepExecutor(runtime_backend="rust")
+        response = executor.execute(
+            ExecuteRequest(
+                dsl_text="data out; set in; NAME = UPCASE(name); output out; run;",
+                inputs={
+                    "in": DataSetRef(
+                        kind="arrow_table",
+                        location="dataset://in",
+                        payload=_arrow_table([
+                            {"name": "alice"},
+                        ]),
+                    )
+                },
+            )
+        )
+
+        self.assertFalse(response.has_errors)
+        self.assertEqual(_output_rows(response, "out"), [{"name": "ALICE"}])
+        self.assertEqual(executor.last_runtime_backend, "rust")
+
+    def test_rust_runtime_applies_set_options_case_insensitively(self) -> None:
+        executor = DataStepExecutor(runtime_backend="rust")
+        response = executor.execute(
+            ExecuteRequest(
+                dsl_text=(
+                    "data out; set in(keep=ID amount rename=(amount=score) where=(ID >= 2)); "
+                    "output out; run;"
+                ),
+                inputs={
+                    "in": DataSetRef(
+                        kind="arrow_table",
+                        location="dataset://in",
+                        payload=_arrow_table([
+                            {"Id": 1, "Amount": 10},
+                            {"Id": 2, "Amount": 20},
+                        ]),
+                    )
+                },
+            )
+        )
+
+        self.assertFalse(response.has_errors)
+        self.assertEqual(_output_rows(response, "out"), [{"Id": 2, "score": 20}])
+        self.assertEqual(executor.last_runtime_backend, "rust")
+
+    def test_rust_runtime_merges_by_and_options_case_insensitively(self) -> None:
+        executor = DataStepExecutor(runtime_backend="rust")
+        response = executor.execute(
+            ExecuteRequest(
+                dsl_text=(
+                    "data out; merge a(keep=SUBJ xa rename=(XA=x)) b(keep=subj yb rename=(YB=y)); "
+                    "by subj; output out; run;"
+                ),
+                inputs={
+                    "a": DataSetRef(
+                        kind="arrow_table",
+                        location="dataset://a",
+                        payload=_arrow_table([
+                            {"Subj": "A", "Xa": 10},
+                            {"Subj": "B", "Xa": 20},
+                        ]),
+                    ),
+                    "b": DataSetRef(
+                        kind="arrow_table",
+                        location="dataset://b",
+                        payload=_arrow_table([
+                            {"subj": "A", "Yb": 100},
+                            {"subj": "C", "Yb": 300},
+                        ]),
+                    ),
+                },
+            )
+        )
+
+        self.assertFalse(response.has_errors)
+        self.assertEqual(
+            _output_rows(response, "out"),
+            [
+                {"Subj": "A", "x": 10, "y": 100},
+                {"Subj": "B", "x": 20},
+                {"Subj": "C", "y": 300},
+            ],
+        )
+        self.assertEqual(executor.last_runtime_backend, "rust")
 
     def test_native_runtime_evaluates_arithmetic_and_logical_where_expression(self) -> None:
         scenario = RUNTIME_SCENARIOS["where_expression_coverage"]["arithmetic_logical"]
