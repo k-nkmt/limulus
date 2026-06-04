@@ -86,6 +86,8 @@ https://k-nkmt.github.io/limulus/
 現在は商用利用は制限しており、個人的な利用や非営利の教育・研究目的に限定して利用可能です。  
 クリエイティブコモンズライセンスはソフトウェアの配布には適さないことから、このプロジェクトではライセンスはPolyForm Noncommercial Licenseにより配布しています。  
 
+`pip` で配布しているパッケージには、Rust クレート `limulus_native` からビルドされるネイティブ拡張が含まれます。Rust 側の依存関係は [native/limulus_native/Cargo.toml](../native/limulus_native/Cargo.toml) に記載しています。  
+
 将来的により広い利用が可能なライセンスへの変更も検討しています。  
 
 お問い合わせ: info@knworx.com  

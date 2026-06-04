@@ -85,6 +85,7 @@ Creative Commons licenses are not used because they are generally not recommende
 
 The software may be used for personal, educational, academic, and noncommercial research purposes.
 Commercial use is not permitted under the current license terms.
+The pip package includes a compiled Rust native extension (`limulus_native`); Rust dependencies are listed in [native/limulus_native/Cargo.toml](native/limulus_native/Cargo.toml).
 
 A more permissive license may be considered in the future as the project gains a more stable foundation.
 
