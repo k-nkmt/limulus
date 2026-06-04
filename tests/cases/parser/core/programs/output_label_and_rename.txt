@@ -1,0 +1,5 @@
+data a(keep=id label="A") b(drop=tmp rename=(name=full_name));
+set inp;
+label id = "Identifier" amount = "Amount";
+rename id = id2 amount=amt score = score_new;
+run;

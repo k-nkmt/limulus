@@ -1,0 +1,29 @@
+{
+  "category": "functions",
+  "variants": [
+    {
+      "case_id": "string_functions_scalar_matrix",
+      "program": "scalar_matrix.txt",
+      "inputs": {
+        "inp": "inputs/scalar_matrix.json"
+      },
+      "expected": "expected/scalar_matrix.json"
+    },
+    {
+      "case_id": "string_functions_regex_scalar_matrix",
+      "program": "regex_scalar_matrix.txt",
+      "inputs": {
+        "inp": "inputs/scalar_matrix.json"
+      },
+      "expected": "expected/regex_scalar_matrix.json"
+    },
+    {
+      "case_id": "string_functions_nullability_cmiss",
+      "program": "nullability_cmiss.txt",
+      "inputs": {
+        "inp": "inputs/scalar_matrix.json"
+      },
+      "expected": "expected/nullability_cmiss.json"
+    }
+  ]
+}

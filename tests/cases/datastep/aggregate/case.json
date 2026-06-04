@@ -1,0 +1,24 @@
+{
+  "category": "aggregate",
+  "variants": [
+    {
+      "case_id": "if_do_sum_retain",
+      "program": "programs/if_do_sum_retain.txt",
+      "inputs": {
+        "in": "inputs/if_do_sum_retain.in.json"
+      },
+      "expected": "expected/if_do_sum_retain.json",
+      "compatibility_notes": [
+        "python runtime does not currently retain intermediate sum variable for this pattern"
+      ]
+    },
+    {
+      "case_id": "sum_statement_accumulation",
+      "program": "programs/sum_statement_accumulation.txt",
+      "inputs": {
+        "in": "inputs/sum_statement_accumulation.in.json"
+      },
+      "expected": "expected/sum_statement_accumulation.json"
+    }
+  ]
+}

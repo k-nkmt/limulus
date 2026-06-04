@@ -1,0 +1,11 @@
+{
+  "datasets": {
+    "out": {
+      "columns": ["subject_id"],
+      "rows": [
+        [1],
+        [2]
+      ]
+    }
+  }
+}

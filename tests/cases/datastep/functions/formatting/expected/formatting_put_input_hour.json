@@ -1,0 +1,10 @@
+{
+  "datasets": {
+    "out": {
+      "columns": ["code", "fixed_text", "rounded_text", "comma_text", "zero_scaled", "best_rendered", "best_value", "visit_y6", "visit_y8", "visit_y10", "visit_iso", "timestamp_iso", "clock_iso", "clock_hour"],
+      "rows": [
+        ["00007", "12345.6", "12346", "12,345.6", "012345.6", "12345.6", 12345.6, "240203", "20240203", "2024-02-03", "2024-02-03", "2024-02-03T16:24:43", "11:30:00", 11.5]
+      ]
+    }
+  }
+}

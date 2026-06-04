@@ -1,0 +1,23 @@
+{
+  "category": "set",
+  "variants": [
+    {
+      "case_id": "set_by_interleave_numeric",
+      "program": "programs/set_by_interleave_numeric.txt",
+      "inputs": {
+        "a": "inputs/set_by_interleave_numeric.a.json",
+        "b": "inputs/set_by_interleave_numeric.b.json"
+      },
+      "expected": "expected/set_by_interleave_numeric.json"
+    },
+    {
+      "case_id": "set_by_interleave_string",
+      "program": "programs/set_by_interleave_string.txt",
+      "inputs": {
+        "a": "inputs/set_by_interleave_string.a.json",
+        "b": "inputs/set_by_interleave_string.b.json"
+      },
+      "expected": "expected/set_by_interleave_string.json"
+    }
+  ]
+}

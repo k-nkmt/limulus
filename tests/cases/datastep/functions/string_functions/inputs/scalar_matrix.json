@@ -1,0 +1,7 @@
+{
+  "columns": ["name", "x"],
+  "rows": [
+    ["hello world", 10],
+    ["foo bar", 20]
+  ]
+}

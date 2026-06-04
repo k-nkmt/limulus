@@ -1,0 +1,8 @@
+data out;
+set in;
+a = .;
+b = "";
+c = None;
+output out;
+keep id a b c;
+run;

@@ -1,0 +1,10 @@
+{
+  "datasets": {
+    "out": {
+      "columns": ["id", "amount", "qty", "group"],
+      "rows": [
+        [1, 10, 2, "A"]
+      ]
+    }
+  }
+}

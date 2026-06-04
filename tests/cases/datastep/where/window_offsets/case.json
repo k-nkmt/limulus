@@ -1,0 +1,31 @@
+{
+  "category": "where",
+  "variants": [
+    {
+      "case_id": "window_offsets_lag",
+      "program": "programs/window_offsets_lag.txt",
+      "inputs": {
+        "in": "inputs/window_offsets_lag.in.json"
+      },
+      "expected": "expected/window_offsets_lag.json"
+    },
+    {
+      "case_id": "window_offsets_shift_source",
+      "extended": true,
+      "program": "programs/window_offsets_shift_source.txt",
+      "inputs": {
+        "in": "inputs/window_offsets_shift_source.in.json"
+      },
+      "expected": "expected/window_offsets_shift_source.json"
+    },
+    {
+      "case_id": "window_offsets_shift_value",
+      "extended": true,
+      "program": "programs/window_offsets_shift_value.txt",
+      "inputs": {
+        "in": "inputs/window_offsets_shift_value.in.json"
+      },
+      "expected": "expected/window_offsets_shift_value.json"
+    }
+  ]
+}

@@ -1,0 +1,64 @@
+{
+  "statements": [
+    {
+      "kind": "DATA"
+    },
+    {
+      "kind": "SET"
+    },
+    {
+      "kind": "ARRAY",
+      "array_spec": {
+        "array_name": "vars",
+        "variables": [
+          "a",
+          "b",
+          "c"
+        ],
+        "wildcard_size": true
+      }
+    },
+    {
+      "kind": "DO",
+      "do_spec": {
+        "loop_var": "i",
+        "start_expr": "1",
+        "end_expr": "3"
+      }
+    },
+    {
+      "kind": "OUTPUT"
+    },
+    {
+      "kind": "END"
+    },
+    {
+      "kind": "ARRAY",
+      "array_spec": {
+        "array_name": "names",
+        "variables": [
+          "first",
+          "second",
+          "third"
+        ],
+        "declared_size": 3,
+        "wildcard_size": false,
+        "character_array": true
+      }
+    },
+    {
+      "kind": "DO",
+      "do_spec": {
+        "loop_var": "idx",
+        "start_expr": "start + 1",
+        "end_expr": "finish - 1"
+      }
+    },
+    {
+      "kind": "END"
+    },
+    {
+      "kind": "RUN"
+    }
+  ]
+}

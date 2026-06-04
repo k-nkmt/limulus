@@ -1,0 +1,4 @@
+* Comment;
+data out;
+/* block comment */ set inp;
+/* block comment */ run;

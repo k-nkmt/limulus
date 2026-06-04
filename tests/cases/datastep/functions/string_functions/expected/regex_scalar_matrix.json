@@ -1,0 +1,11 @@
+{
+  "datasets": {
+    "out": {
+      "columns": ["y_prxmatch", "y_prxmatch_ci", "y_prxchange"],
+      "rows": [
+        [7.0, 7.0, "hello earth"],
+        [0.0, 0.0, "foo bar"]
+      ]
+    }
+  }
+}

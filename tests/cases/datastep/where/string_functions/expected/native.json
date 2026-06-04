@@ -1,0 +1,10 @@
+{
+  "datasets": {
+    "out": {
+      "columns": ["id", "name", "code", "path"],
+      "rows": [
+        [1, " alice ", "x1", "root/usr/bin"]
+      ]
+    }
+  }
+}

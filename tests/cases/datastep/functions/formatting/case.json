@@ -1,0 +1,14 @@
+{
+  "category": "functions",
+  "variants": [
+    {
+      "case_id": "formatting_put_input_hour",
+      "backend": "rust",
+      "program": "programs/formatting_put_input_hour.txt",
+      "inputs": {
+        "inp": "inputs/formatting_put_input_hour.json"
+      },
+      "expected": "expected/formatting_put_input_hour.json"
+    }
+  ]
+}

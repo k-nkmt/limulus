@@ -1,0 +1,5 @@
+data out;
+  set in;
+  if not(amount > 0) then delete;
+  output out;
+run;

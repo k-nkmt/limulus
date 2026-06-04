@@ -70,27 +70,7 @@ df_out = session["result"].to_pandas()
 print(df_out)
 ```
 
-### 4. Use Column-Oriented Helpers
-
-You can also reshape or enrich loaded datasets through the session-local column API.
-
-```python
-session.dataset("health").assign(
-  out="health_scored",
-  bmi="round(weight_kg / (height_m**2), 0.1)",
-  bmi_flag="case when bmi >= 25 then 'high' when bmi >= 18.5 then 'normal' else 'low' end",
-)
-
-session.dataset("visits_long").transpose(
-  by=["subject_id"],
-  id=["visit"],
-  var=["score"],
-  out="visits_wide",
-)
-```
-
 ---
-
 
 ## Documentation
 
@@ -106,7 +86,7 @@ Creative Commons licenses are not used because they are generally not recommende
 The software may be used for personal, educational, academic, and noncommercial research purposes.
 Commercial use is not permitted under the current license terms.
 
-I may consider adopting a different licensing model in the future as the project evolves.
+A more permissive license may be considered in the future as the project gains a more stable foundation.
 
 contact: info@knworx.com
 

@@ -1,0 +1,12 @@
+data out;
+set inp end=eof;
+set inp end = eof;
+set inp end= eof;
+set inp end =eof;
+set inp indsname=src;
+set inp indsname = src;
+set inp(in=flag1);
+set inp(in = flag2);
+set inp(in= flag3);
+set inp(in =flag4);
+run;

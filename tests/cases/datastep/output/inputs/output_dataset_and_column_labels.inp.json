@@ -1,0 +1,6 @@
+{
+  "columns": ["id", "amount"],
+  "rows": [
+    [1, 10]
+  ]
+}

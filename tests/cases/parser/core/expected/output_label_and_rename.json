@@ -1,0 +1,50 @@
+{
+  "statements": [
+    {
+      "kind": "DATA",
+      "dataset_refs": [
+        {
+          "name": "a",
+          "options": {
+            "keep_vars": [
+              "id"
+            ],
+            "label": "A"
+          }
+        },
+        {
+          "name": "b",
+          "options": {
+            "drop_vars": [
+              "tmp"
+            ],
+            "rename_map": {
+              "name": "full_name"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "kind": "SET"
+    },
+    {
+      "kind": "LABEL",
+      "label_map": {
+        "id": "Identifier",
+        "amount": "Amount"
+      }
+    },
+    {
+      "kind": "RENAME",
+      "rename_map": {
+        "id": "id2",
+        "amount": "amt",
+        "score": "score_new"
+      }
+    },
+    {
+      "kind": "RUN"
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "category": "targets",
+  "variants": [
+    {
+      "case_id": "work_prefix_in_output_targets",
+      "program": "programs/work_prefix_in_output_targets.txt",
+      "inputs": {
+        "in": "inputs/work_prefix_in_output_targets.in.json"
+      },
+      "expected": "expected/work_prefix_in_output_targets.json"
+    }
+  ]
+}

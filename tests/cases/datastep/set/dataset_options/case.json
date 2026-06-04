@@ -1,0 +1,40 @@
+{
+  "category": "set",
+  "variants": [
+    {
+      "case_id": "dataset_options_order",
+      "program": "programs/dataset_options_order.txt",
+      "inputs": {
+        "in": "inputs/dataset_options_order.in.json"
+      },
+      "expected": "expected/dataset_options_order.json"
+    },
+    {
+      "case_id": "set_in_flag_subset",
+      "program": "programs/set_in_flag_subset.txt",
+      "inputs": {
+        "a": "inputs/set_in_flag_subset.a.json",
+        "b": "inputs/set_in_flag_subset.b.json"
+      },
+      "expected": "expected/set_in_flag_subset.json"
+    },
+    {
+      "case_id": "set_multi_input_order",
+      "program": "programs/set_multi_input_order.txt",
+      "inputs": {
+        "a": "inputs/set_multi_input_order.a.json",
+        "b": "inputs/set_multi_input_order.b.json",
+        "c": "inputs/set_multi_input_order.c.json"
+      },
+      "expected": "expected/set_multi_input_order.json"
+    },
+    {
+      "case_id": "by_rename_internal_cleanup",
+      "program": "programs/by_rename_internal_cleanup.txt",
+      "inputs": {
+        "in": "inputs/by_rename_internal_cleanup.in.json"
+      },
+      "expected": "expected/by_rename_internal_cleanup.json"
+    }
+  ]
+}

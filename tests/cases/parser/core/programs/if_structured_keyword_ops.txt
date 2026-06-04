@@ -1,0 +1,5 @@
+data out;
+set in;
+if amount eq 0 and not flag;
+if score ^= 1 or amount le 10 then output out;
+run;

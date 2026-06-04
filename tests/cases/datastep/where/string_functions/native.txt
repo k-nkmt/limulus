@@ -1,0 +1,5 @@
+data out;
+  set in;
+  where substr(trim(name), 1, 1) = 'a' and upcase(code) = 'X1'
+    and scan(path, 2, '/') = 'usr' and compress('a b c') = 'abc';
+run;

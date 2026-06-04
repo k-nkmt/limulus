@@ -1,0 +1,13 @@
+{
+  "diagnostics": [
+    {
+      "stage": "pre-evaluations",
+      "code": "RUNTIME_MERGE_DUPLICATE_COLUMN",
+      "severity": "error",
+      "message_fragments": [
+        "duplicate non-BY columns",
+        "VALUE"
+      ]
+    }
+  ]
+}

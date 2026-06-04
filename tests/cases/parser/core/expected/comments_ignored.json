@@ -1,0 +1,18 @@
+{
+  "statements": [
+    {
+      "kind": "DATA"
+    },
+    {
+      "kind": "SET",
+      "dataset_refs": [
+        {
+          "name": "inp"
+        }
+      ]
+    },
+    {
+      "kind": "RUN"
+    }
+  ]
+}

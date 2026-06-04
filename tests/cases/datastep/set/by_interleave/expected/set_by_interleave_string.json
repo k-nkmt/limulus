@@ -1,0 +1,13 @@
+{
+  "datasets": {
+    "out": {
+      "columns": ["name", "grp"],
+      "rows": [
+        ["Alice", "a"],
+        ["Bob", "b"],
+        ["Catherine", "a"],
+        ["Dave", "b"]
+      ]
+    }
+  }
+}

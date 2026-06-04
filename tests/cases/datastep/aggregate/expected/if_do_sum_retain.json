@@ -1,0 +1,10 @@
+{
+  "datasets": {
+    "out": {
+      "columns": ["id", "flag"],
+      "rows": [
+        [2, null]
+      ]
+    }
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "datasets": {
+    "out_hi": {
+      "columns": ["id", "amount"],
+      "rows": [
+        [2, 12]
+      ]
+    },
+    "out_lo": {
+      "columns": ["id", "amount"],
+      "rows": [
+        [1, 5]
+      ]
+    }
+  }
+}

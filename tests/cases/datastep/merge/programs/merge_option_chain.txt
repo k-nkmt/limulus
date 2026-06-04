@@ -1,0 +1,5 @@
+data out;
+  set in(keep=id amount tmp drop=tmp where=(amount >= 10) rename=(amount=amt) in=in_flag) indsname=src end=eof;
+  if in_flag and eof then output ;
+  keep id amt;
+run;

@@ -1,0 +1,10 @@
+{
+  "datasets": {
+    "WORK.OUT": {
+      "columns": ["id"],
+      "rows": [
+        [1.0]
+      ]
+    }
+  }
+}

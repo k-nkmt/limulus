@@ -1,0 +1,10 @@
+data out;
+set in;
+array vars[*] a b c;
+do i = 1 to 3;
+output out;
+end;
+array names 3 $ first second third;
+do idx = start + 1 to finish - 1;
+end;
+run;

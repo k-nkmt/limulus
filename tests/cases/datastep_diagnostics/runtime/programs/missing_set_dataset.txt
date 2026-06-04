@@ -1,0 +1,4 @@
+data out;
+  set missing_ds;
+  output out;
+run;

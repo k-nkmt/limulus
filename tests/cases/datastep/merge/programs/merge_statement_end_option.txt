@@ -1,0 +1,6 @@
+data out;
+  merge a b end=eof;
+  by id;
+  if eof then output;
+  keep id eof;
+run;

@@ -1,0 +1,21 @@
+{
+  "category": "where",
+  "variants": [
+    {
+      "case_id": "session_string_functions",
+      "program": "session.txt",
+      "inputs": {
+        "in": "inputs/session.json"
+      },
+      "expected": "expected/session.json"
+    },
+    {
+      "case_id": "string_native_functions",
+      "program": "native.txt",
+      "inputs": {
+        "in": "inputs/native.json"
+      },
+      "expected": "expected/native.json"
+    }
+  ]
+}

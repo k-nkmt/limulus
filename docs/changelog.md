@@ -2,13 +2,15 @@
 
 All notable changes to this project are documented on this page.
 
-## [Unreleased]
+## [v0.5.0] - 2026-06-04
+
+`v0.3.x` and `v0.4.x` are treated as internal development milestones, and this section summarizes the changes rolled up into `v0.5.0`.
 
 ### Added
 
 - `Session.transpose(...)` and `DatasetView.transpose(...)` for minimal PROC TRANSPOSE-like reshaping with `by`, `id`, `var`, and `out`.
 - `Session.assign(...)` and `DatasetView.assign(...)` for ordered Data Step-style column creation with literals, expressions, built-in functions, and `case when ... then ... else ... end`, executed left-to-right through Polars column expressions for supported assignment syntax.
-- Built-in `put(...)`, `input(...)`, and `hour(...)` support across helper expressions plus both Python and Rust runtimes, backed by a shared session format / informat registry.
+- Built-in `put(...)` and `input(...)` support in helper expressions, backed by a shared session format / informat registry.
 - `Session.dictionary.tables`, `Session.dictionary.columns`, `Session.dictionary(name)`, and `DatasetView.dictionary` for dynamic Arrow-metadata-backed dictionary views.
 - Structured diagnostics now carry span/label/source metadata across parse and validation failures.
 
@@ -23,6 +25,11 @@ All notable changes to this project are documented on this page.
 - Session dataset lookup now strips a `WORK.` prefix consistently and normalizes through a shared dataset-key helper.
 - The Rust backend now consumes parser-provided structured AST payloads for `IF` / `DO` / `ARRAY` and dataset references instead of maintaining a separate subset parse path.
 - Helper pipelines now preserve Arrow metadata and numeric column types more consistently across transpose and Arrow/Polars roundtrips.
+- The Python backend now has a narrower role, and data handoff is now Arrow-based.
+
+### Fixed
+
+- Multi-block `Session.submit(...)` now prefers datasets created earlier in the same submit call when a later `SET` reuses the same dataset name, preventing stale rows from pre-existing session tables from being mixed into rewritten outputs.
 
 ## [v0.2.0] - 2026-03-17
 

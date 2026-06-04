@@ -1,0 +1,29 @@
+{
+  "statements": [
+    {
+      "kind": "DATA"
+    },
+    {
+      "kind": "SET"
+    },
+    {
+      "kind": "IF",
+      "if_spec": {
+        "condition": "amount == 0 and not flag",
+        "then_action": null,
+        "is_subset": true
+      }
+    },
+    {
+      "kind": "IF",
+      "if_spec": {
+        "condition": "score != 1 or amount <= 10",
+        "then_action": "output out",
+        "is_subset": false
+      }
+    },
+    {
+      "kind": "RUN"
+    }
+  ]
+}

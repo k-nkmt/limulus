@@ -1,0 +1,29 @@
+{
+  "category": "automatic_vars",
+  "variants": [
+    {
+      "case_id": "concat_and_lowercase_n_auto_variable",
+      "program": "programs/concat_and_n.txt",
+      "inputs": {
+        "in": "inputs/concat_and_n.json"
+      },
+      "expected": "expected/concat_and_n.json"
+    },
+    {
+      "case_id": "auto_variables_case_insensitive",
+      "program": "programs/auto_variables_case_insensitive.txt",
+      "inputs": {
+        "inp": "inputs/auto_variables_case_insensitive.inp.json"
+      },
+      "expected": "expected/auto_variables_case_insensitive.json"
+    },
+    {
+      "case_id": "first_last_by_group_flags",
+      "program": "programs/first_last_by_group_flags.txt",
+      "inputs": {
+        "in": "inputs/first_last_by_group_flags.in.json"
+      },
+      "expected": "expected/first_last_by_group_flags.json"
+    }
+  ]
+}

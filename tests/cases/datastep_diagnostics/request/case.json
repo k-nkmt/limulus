@@ -1,0 +1,14 @@
+{
+  "owner": "request",
+  "variants": [
+    {
+      "case_id": "request_invalid_output_targets",
+      "program": "programs/invalid_output_targets.txt",
+      "inputs": {
+        "in": "inputs/shared_in.json"
+      },
+      "output_targets": [],
+      "expected": "expected/invalid_output_targets.diagnostics.json"
+    }
+  ]
+}

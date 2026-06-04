@@ -1,0 +1,22 @@
+{
+  "category": "array",
+  "variants": [
+    {
+      "case_id": "array_assignment_dim_vname",
+      "program": "assignment_dim_vname.txt",
+      "inputs": {
+        "in": "inputs/assignment_dim_vname.json"
+      },
+      "expected": "expected/assignment_dim_vname.json"
+    },
+    {
+      "case_id": "array_star_dimension_index_access",
+      "backend": "auto",
+      "program": "programs/array_star_dimension_index_access.txt",
+      "inputs": {
+        "inp": "inputs/array_star_dimension_index_access.inp.json"
+      },
+      "expected": "expected/array_star_dimension_index_access.json"
+    }
+  ]
+}

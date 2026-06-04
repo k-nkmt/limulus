@@ -1,0 +1,5 @@
+data out;
+  merge a b;
+  by id;
+  keep id x y FIRST.id LAST.id;
+run;

@@ -1,0 +1,6 @@
+data out_a out_b;
+  set in;
+  where amount >= 0;
+  if amount > 10 then output out_a;
+  else output out_b;
+run;

@@ -1,0 +1,8 @@
+data out;
+  set inp;
+  array vars [*] a b c;
+  dim_vars = dim(vars);
+  x = vars[2];
+  output out;
+  keep dim_vars x;
+run;

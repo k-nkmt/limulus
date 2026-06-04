@@ -1,0 +1,11 @@
+data out;
+  set in;
+  array chars $ c1 c2;
+  array vals a b c;
+  vals(1) = vals(1) * 10;
+  vals[2] = vals[2] * 10;
+  vals{3} = vals{3} * 10;
+  arr_size = dim(vals);
+  name2 = vname(vals[2]);
+  keep a b c arr_size name2 c1 c2;
+run;

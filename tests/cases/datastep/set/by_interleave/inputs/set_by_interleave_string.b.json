@@ -1,0 +1,7 @@
+{
+  "columns": ["name", "grp"],
+  "rows": [
+    ["Bob", "b"],
+    ["Dave", "b"]
+  ]
+}

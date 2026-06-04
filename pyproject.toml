@@ -1,11 +1,11 @@
 [project]
 name = "limulus"
-version = "0.2.0"
+version = "0.5.0"
 description = "DataStep for Your Workspace"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "PolyForm Noncommercial License 1.0.0" }
-license-files = ["LICENSE.txt"]
+license-files = ["LICENSE"]
 authors = [
   { name = "Ken Nakamatsu", email = "ken-nakamatsu@knworx.com" },
 ]
@@ -61,3 +61,4 @@ python-packages = ["limulus"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+testpaths = ["tests"]

@@ -1,0 +1,7 @@
+data out;
+  set in;
+  do times = 1 to 3;
+    output;
+  end;
+  keep id times;
+run;

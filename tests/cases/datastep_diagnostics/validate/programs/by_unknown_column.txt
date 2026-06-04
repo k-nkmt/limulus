@@ -1,0 +1,4 @@
+data out;
+merge a b;
+by missing;
+run;

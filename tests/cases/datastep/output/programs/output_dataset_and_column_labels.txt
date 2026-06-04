@@ -1,0 +1,5 @@
+data dm(label="DM");
+  set inp;
+  label id = "Identifier" amount = "Amount";
+  output dm;
+run;

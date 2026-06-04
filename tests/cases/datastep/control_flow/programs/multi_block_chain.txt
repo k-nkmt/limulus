@@ -1,0 +1,8 @@
+data stage1;
+  set in;
+run;
+
+data stage2;
+  set stage1;
+  if id = 2 then output ;
+run;

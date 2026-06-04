@@ -29,26 +29,61 @@ Compatibility with SAS software is not guaranteed and is not a project goal. Cer
 limulus/              Python package
   __init__.py         Public API (Session, submit, run, ...)
   session.py          Session class (user-facing interface layer)
-  runtime.py          Execution services (PDVRuntime, ProgramExecution, etc.)
-  executor.py         Backend selection & management
-    executor_python.py  Python backend orchestration entry point
-    executor_py_stage.py  Python backend pipeline stages (input preparation / runtime dispatch)
-    executor_py_stmt.py   Python statement-block execution helpers
-    executor_py_data.py   Dataset option / SET / MERGE helpers used by Python backend
-  parser.py           Parser backend selection & AST models
+  session_parsing.py  Session.filter / Session.sql parsing and diagnostics
+  column_api.py       assign / transpose internals and case-when parsing
+  parser.py           Parser backend selection and AST models
   models.py           Shared data models (Diagnostic, SubmitResult, etc.)
-  io.py               Arrow ↔ row-list conversion
+  io.py               Arrow conversion helpers and synthetic dictionary inputs
   io_adapters.py      Input/output adapters
-  backends.py         Backend capability checks
+  arrow_bridge.py     Arrow metadata restoration and table stabilization
+  native_bridge.py    Native extension loading helpers
+  renderer.py         Diagnostic rendering helpers
+  block_splitter.py   Multi-block splitting helpers
+  format_registry.py  Custom format / informat registry
+  naming.py           Shared dataset / column normalization helpers
+  execution/
+    coordinator.py        DataStepExecutor orchestration and input resolution
+    pipeline.py           Shared pipeline dataclasses and block coordination
+    input_preparation.py  Shared input preparation and dataset option handling
+    output_handoff.py     Shared output filtering and Arrow handoff
+    rewrites.py           Rewrite planning helpers
+    python_backend.py     Residual Python backend entry point
+    python_statement_blocks.py  Residual Python statement-block execution helpers
+    python_statements.py        Residual Python backend dispatch helpers
+  backend_integration/
+    backend_dispatch_policy.py  Backend routing policy
+    selection.py                Runtime selection outcomes
+    contracts.py                Rust handoff contracts
+    rust_bridge.py              Python -> Rust bridge helpers
+    rust_executor.py            Native execution entry point
+    transport.py                Arrow / row transport rules
+  runtime/
+    row_runtime.py      Row runtime state and apply helpers
+    expressions.py      Expression evaluation helpers
+    conditions.py       Conditional evaluation helpers
+    arrow_cursor.py     Arrow row cursor helpers
   grammar/
-    datastep.lark     EBNF grammar definition (lark)
+    *.lark              EBNF grammar definitions
 
 native/
-  limulus_native/     Rust crate
-    src/lib.rs        PDV loop engine / expression evaluation engine (core)
+  limulus_native/      Rust crate
     Cargo.toml
+    src/lib.rs                  PyO3 entry point
+    src/ast.rs                  AST adapters
+    src/diagnostics.rs          Native diagnostics
+    src/expressions.rs          Native expression evaluation
+    src/expressions/functions.rs  Native function dispatch
+    src/io.rs                   Arrow / Python I/O bridging
+    src/output.rs               Output assembly
+    src/output/accumulator.rs   Output accumulation helpers
+    src/row_cursor.rs           Native row cursor
+    src/runtime.rs              Native row-loop runtime
+    src/runtime/state.rs        Native runtime state
+    src/source_view.rs          Source span helpers
 
-tests/                pytest test suite
+tests/                pytest release-facing public suite
+tests_dev/            internal residual contract, boundary, routing, and benchmark suites
+tests/cases/          external success/diagnostic case packs and inventory/report JSON
 docs/                 Sphinx documentation (MyST / myst-nb)
 ```
 
@@ -63,25 +98,27 @@ user code
 Session (session.py)
     │ ExecuteRequest
     ▼
-DataStepExecutor (executor.py)
+DataStepExecutor (execution/coordinator.py)
     │ ExecutionPipelineCoordinator
-    │  1) split blocks
-    │  2) macro hook(in future)
-    │  3) parse (parser.py + grammar/datastep.lark)
-    │  4) resolve inputs
-    │  5) pre-processing inputs
-    │  6) pre-evaluations
-    │  7) execute runtime backend
-    │      ├─ Python backend → PythonBackendExecutionService (executor_python.py)
-    │      │                     ├─ pipeline stages (executor_py_stage.py)
-    │      │                     ├─ statement helpers (executor_py_stmt.py)
-    │      │                     ├─ dataset helpers (executor_py_data.py)
-    │      │                     └─ PDVRuntimeService (runtime.py)
-    │      └─ Rust backend   → limulus_native.execute_datastep (lib.rs)
-    │  8) resolve outputs (temporary/internal variable filtering)
-    │  9) output conversion (arrow_table)
+    │  1) macro hook / unsupported syntax skip
+    │  2) split blocks
+    │  3) parse (parser.py + grammar/*.lark)
+    │  4) validate
+    │  5) resolve inputs
+    │  6) pre-processing inputs
+    │  7) pre-evaluations
+    │  8) plan generation
+    │  9) execute runtime backend
+    │      ├─ Rust backend (default)
+    │      │    └─ backend_integration/rust_bridge.py
+    │      │         -> rust_executor.py
+    │      │         -> limulus_native.execute_datastep (src/lib.rs)
+    │      └─ Residual Python backend
+    │           └─ execution/python_backend.py
+    │ 10) resolve outputs (temporary/internal variable filtering)
+    │ 11) apply output metadata
     ▼
-ExecuteResponse → Session catalog (Arrow tables)
+ExecuteResponse -> Session catalog (Arrow tables)
 ```
 
 ### Key Design Decisions
@@ -89,30 +126,31 @@ ExecuteResponse → Session catalog (Arrow tables)
 | Item | Detail |
 |------|------|
 | Parser | lark only (Python). Rust is not involved in parsing |
-| Data representation | Storage/I/O uses Apache Arrow. During PDV loop, converted to row dicts |
-| Rust scope | Native block execution via Arrow C stream bridge; shared preprocessing and orchestration stay in `executor.py` |
-| Backend selection | `auto` or `rust` preference may fall back to Python when Rust capability/inputs are unsupported (e.g. non-arrow inputs, `apply()`) |
-| BY groups | executor sorts ascending by BY variables (Arrow-native) before execution |
+| Data representation | Storage/I/O uses Apache Arrow. Arrow is the canonical table representation |
+| Rust scope | Standard row-loop execution is Rust-first; shared preprocessing and postprocessing stay in Python |
+| Backend selection | `auto`, `rust`, and `python` act as routing preferences or seam controls; normal Arrow-backed execution is not expected to use Python row-loop by default |
+| BY groups | Coordinator sorts ascending by BY variables before execution when required |
 | SUM statement behavior | Based on current row value; `sum_totals` acts as fallback when variable is absent from row |
 
 ### Pipeline Stage Diagnostics
 
-- Each diagnostic now carries an independent `stage` field (instead of stage text being prefixed in `message`).
+- Each diagnostic carries an independent `stage` field.
 - `Session.submit()` maps this field into `LogEntry.stage`.
 - `SubmitResult.format_log()` renders stage as a dedicated item: `Severity [stage: ...]: message`.
 
 ### Temporary/Internal Variables
 
 - Internal helper variables from execution (`IN=`, `INDSNAME=`, `END=`, `FIRST./LAST.` and their renamed aliases)
-    are filtered centrally in the pipeline output stage (`resolve outputs`).
-- This filtering is backend-agnostic and is applied after runtime execution so behavior is consistent across
-    Python and Rust backends.
+  are filtered centrally in the shared output handoff stage.
+- This filtering is backend-agnostic and is applied after runtime execution so behavior stays consistent across
+  Rust and residual Python execution.
 
 ### Backend Boundary
 
-- Files named `executor_python*` are intended to remain Python-backend specific.
-- Shared behavior that must also apply to Rust or `auto` execution, such as backend-agnostic input normalization or source dataset option preprocessing, should live in `executor.py` or other non-Python-specific modules.
-- This keeps the Python backend files focused on Python row-loop execution details and avoids implying that Rust execution depends on `executor_python*` internals.
+- Files under `execution/python_*` are residual Python-backend-specific.
+- Shared behavior that must also apply to Rust execution, such as backend-agnostic input normalization,
+  source dataset option preprocessing, synthetic dictionary table synthesis, and shared output shaping, should live in backend-neutral modules.
+- Rust handoff contracts, routing policy, and transport rules belong in `backend_integration/`.
 
 ---
 
@@ -123,86 +161,82 @@ ExecuteResponse → Session catalog (Arrow tables)
 uv sync --group dev
 
 # Rebuild Rust (--release is required to reflect changes)
-uv run maturin develop --release
+uv run --no-sync maturin develop --release
 ```
 
 > ⚠️ **`maturin develop` (without options) generates a debug build but does NOT update the `.so` in site-packages.**  
-> After modifying Rust code, always run with `--release`.  
-
+> After modifying Rust code, always run with `--release`.
 
 ---
 
 ## Testing
 
 ```bash
-uv run pytest               # all tests
-uv run pytest -q            # concise output
-uv run pytest -x            # stop on first failure
-uv run pytest tests/test_session.py -v
-uv run pytest tests/test_session_methods.py -v
-uv run pytest tests/test_dataset_view_methods.py -v
+uv run --no-sync pytest     # all tests
+uv run --no-sync pytest -q  # concise output
+uv run --no-sync pytest -x  # stop on first failure
 ```
 
 Test file mapping:
 
 | File | Target |
 |----------|------|
-| `test_session.py` | Session integration / end-to-end scenarios |
-| `test_session_methods.py` | Session method-focused scenarios (`load`, `select`, `sort`, `sql`, etc.) |
-| `test_dataset_view_methods.py` | DatasetView method-focused scenarios and chaining |
-| `test_submit.py` | submit/run convenience functions |
-| `test_runtime.py` | PDV runtime service |
-| `test_parser.py` | Parser |
-| `test_io.py` / `test_io_adapters.py` | I/O conversion |
-| `test_pdv_runtime.py` | PDV loop (Python backend) |
-| `test_advanced_runtime_services.py` | Advanced features: RETAIN / ARRAY / BY, etc. |
-| `test_functions.py` | Functions |
+| `tests/test_session.py` | Session integration / end-to-end scenarios and public API contracts |
+| `tests/test_submit.py` | submit/run convenience functions and dictionary Data Step regressions |
+| `tests/test_runtime.py` | Runtime routing and execution contracts |
+| `tests/test_runtime_backend_contract.py` | Public backend preference smoke wrappers |
+| `tests/test_session_backend_contract.py` | Public session/backend preference wrappers |
+| `tests/test_session_renderer_adapter_contract.py` | Public renderer/adapter wrappers |
+| `tests/test_submit_renderer_adapter_contract.py` | Public submit adapter/convert_outputs wrapper |
+| `tests_dev/backend_selection/test_runtime_backend_contract.py` | Internal backend parity and dataset-option matrix |
+| `tests_dev/backend_selection/test_session_backend_contract.py` | Internal session/backend residual wrapper |
+| `tests_dev/boundary_contracts/test_session_renderer_internal_contracts.py` | Internal renderer availability, fallback, and lazy materialization contracts |
+| `tests_dev/boundary_contracts/test_release_surface_inventory_v05o.py` | Inventory/report and release-surface split guards |
 
+Public minimum wrappers stay under `tests/`. Internal residual wrappers stay under `tests_dev/`. When moving contract wrappers, keep the delegated contract targets disjoint and update the release-surface inventory/report at the same time.
 
 ---
 
 ## Building Documentation
 
 ```bash
-cd docs
-uv run sphinx-build -b html . _build/html
+uv run sphinx-build -b html docs docs/_build/html
 ```
 
 ---
 
 ## Notes When Modifying Key Files
 
-### When modifying `limulus/executor.py` or `limulus/executor_python.py`
-- `executor.py` contains `DataStepExecutor`: orchestration, backend selection, I/O resolution, multi-block coordination
-- `executor_python.py` contains `PythonBackendExecutionService`: Python backend entry point and high-level row-loop orchestration
-- `executor_py_stage.py` contains Python-backend pipeline stages such as input preparation and execution-mode dispatch
-- `executor_py_stmt.py` contains statement/block execution helpers (`IF`, `DO`, `ARRAY`, `SUM`, `ASSIGN`, etc.)
-- `executor_py_data.py` contains source dataset option handling and `SET` / `MERGE` row-building helpers
-- Prefer pipeline-level post-processing for cross-backend behavior (e.g. internal temporary variable filtering)
-- When adding new statement types or row-processing logic, changes typically go in `executor_py_stmt.py`
-- When adjusting source-row preparation or SET/MERGE behavior, changes typically go in `executor_py_stage.py` or `executor_py_data.py`
-- When modifying backend selection or I/O handling, changes go in `executor.py`
-- Always verify with `uv run pytest` after changes to either file
+### When modifying `limulus/execution/coordinator.py` or `limulus/execution/python_backend.py`
+- `coordinator.py` contains `DataStepExecutor`: orchestration, backend selection, I/O resolution, and multi-block coordination.
+- `python_backend.py` contains the residual Python backend entry point and high-level Python row-loop orchestration.
+- `input_preparation.py` contains shared input preparation such as dataset options and source-row planning.
+- `output_handoff.py` contains shared post-runtime filtering and Arrow output shaping.
+- `python_statement_blocks.py` contains residual Python statement/block execution helpers (`IF`, `DO`, `ARRAY`, `SUM`, `ASSIGN`, etc.).
+- `python_statements.py` contains residual Python backend dispatch helpers.
+- Prefer shared pipeline post-processing for cross-backend behavior.
+- When modifying backend selection or Rust routing behavior, changes typically go in `coordinator.py` or `backend_integration/*`.
+- Always verify with `uv run --no-sync pytest -q` after changes to these files.
 
-### When modifying `native/limulus_native/src/lib.rs`
-1. Recompile with `uv run maturin develop --release`
-2. If using Jupyter, restart the kernel
-3. Verify with tests: `uv run pytest`
+### When modifying `native/limulus_native/src`
+1. Recompile with `uv run --no-sync maturin develop --release`
+2. If native runtime behavior changed, inspect related files under `src/runtime.rs`, `src/expressions.rs`, `src/io.rs`, and `src/output.rs`
+3. Verify with focused backend/runtime tests before broader validation
 
-### When modifying `limulus/grammar/datastep.lark`
+### When modifying `limulus/grammar/*.lark`
 - lark caches the parser, so verify grammar changes are reflected in existing tests
 
 ### When modifying the public API in `limulus/__init__.py`
 - Use `__all__` to explicitly declare the public API
-- If removing existing re-exports for compatibility, check all usages (tests/benchmarks/docs)
+- If removing existing re-exports for compatibility, check all usages (tests / docs / examples)
 
 ---
 
 ## Known Warnings (from Lark)
 
-- When running `uv run pytest` or `uv run sphinx-build`, a `DeprecationWarning` (`Flags not at the start of the expression`) from Lark's internal implementation may appear.
+- When running `uv run --no-sync pytest` or `uv run sphinx-build`, a `DeprecationWarning`
+  (`Flags not at the start of the expression`) from Lark's internal implementation may appear.
 - This is a known non-fatal warning and does not affect build/test results (pass/fail).
-- Resolution will be considered when the upstream (Lark) update becomes necessary.
 
 ---
 
@@ -211,21 +245,8 @@ uv run sphinx-build -b html . _build/html
 | Module | Visibility |
 |-----------|---------|
 | `Session`, `submit`, `run` | Public user API |
-| `SubmitResult`, `LogEntry`, `DatasetCatalog` | Public (return types) |
-| `DataStepExecutor`, `RuntimeRequirements` | Internal / advanced use |
+| `SubmitResult`, `LogEntry`, `DatasetCatalog` | Public return types |
+| `DataStepExecutor`, `RuntimeBackendSelector` | Internal / advanced use |
 | `io_adapters.*`, `models.*` (except `SubmitResult`, etc.) | Internal |
 | `parser.*` (`DataStepAst`, etc.) | Internal / advanced use |
 | `limulus_native.*` | Rust bindings, not for direct use |
-
----
-
-## Key Rust Backend Structures (`lib.rs`)
-
-| Function / Struct | Role |
-|------------|------|
-| `execute_datastep()` | PyO3 entry point |
-| `execute_statement_block()` | Recursive execution of statement lists |
-| `execute_inline_action()` | Single-line action execution for IF THEN |
-| `evaluate_scalar_expression()` | Expression evaluation (Rust-native + Python fallback) |
-| `EvalRuntimeState` | Execution state (RETAIN values, SUM accumulations, ARRAY definitions) |
-| `AstStatement` | AST node passed from parser (via PyO3) |

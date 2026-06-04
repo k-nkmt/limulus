@@ -1,0 +1,6 @@
+data out;
+  merge left right;
+  by subj;
+  if first.subj = FIRST.subj and last.subj = LAST.subj then output ;
+  keep subj;
+run;

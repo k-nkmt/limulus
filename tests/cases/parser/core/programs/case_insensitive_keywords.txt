@@ -1,0 +1,5 @@
+DaTa Out;
+SeT Work.Input;
+WhErE amount > 0;
+OuTpUt OUT;
+RuN;

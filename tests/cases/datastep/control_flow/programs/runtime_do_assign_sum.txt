@@ -1,0 +1,8 @@
+data out;
+  set in;
+  total + amount;
+  do i = 1 to 2;
+    calc = amount * i;
+    output out;
+  end;
+run;

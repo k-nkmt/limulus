@@ -1,0 +1,17 @@
+{
+  "datasets": {
+    "stage1": {
+      "columns": ["id"],
+      "rows": [
+        [1],
+        [2]
+      ]
+    },
+    "stage2": {
+      "columns": ["id"],
+      "rows": [
+        [2]
+      ]
+    }
+  }
+}

@@ -1,0 +1,5 @@
+data out;
+  set inp;
+  y = cmiss(name, x);
+  keep y;
+run;

@@ -1,0 +1,12 @@
+{
+  "category": "where",
+  "variants": [
+    {
+      "case_id": "builtin_predicates",
+      "inputs": {
+        "in": "inputs/in.json"
+      },
+      "expected": "expected/output.json"
+    }
+  ]
+}

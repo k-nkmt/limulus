@@ -1,0 +1,9 @@
+data out;
+set in;
+if amount > 0 then output out;
+else if amount = 0 then do;
+keep amount;
+end;
+else drop amount;
+where amount >= 0;
+run;

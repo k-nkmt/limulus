@@ -1,0 +1,13 @@
+{
+  "diagnostics": [
+    {
+      "stage": "pre-evaluations",
+      "code": "RUNTIME_INTERNAL_VAR_NAME_COLLISION",
+      "severity": "error",
+      "message_fragments": [
+        "reserved internal reference variable name",
+        "FIRST.id"
+      ]
+    }
+  ]
+}

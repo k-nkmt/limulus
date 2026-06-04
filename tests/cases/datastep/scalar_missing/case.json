@@ -1,0 +1,14 @@
+{
+  "category": "scalar_missing",
+  "variants": [
+    {
+      "case_id": "missing_assignment_dot_none_empty_string",
+      "backend": "auto",
+      "program": "missing_assignment.txt",
+      "inputs": {
+        "in": "inputs/missing_assignment.json"
+      },
+      "expected": "expected/missing_assignment.json"
+    }
+  ]
+}

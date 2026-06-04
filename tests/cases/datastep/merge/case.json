@@ -1,0 +1,40 @@
+{
+  "category": "merge",
+  "variants": [
+    {
+      "case_id": "merge_option_chain",
+      "program": "programs/merge_option_chain.txt",
+      "inputs": {
+        "in": "inputs/merge_option_chain.in.json"
+      },
+      "expected": "expected/merge_option_chain.json"
+    },
+    {
+      "case_id": "merge_statement_end_option",
+      "program": "programs/merge_statement_end_option.txt",
+      "inputs": {
+        "a": "inputs/merge_statement_end_option.a.json",
+        "b": "inputs/merge_statement_end_option.b.json"
+      },
+      "expected": "expected/merge_statement_end_option.json"
+    },
+    {
+      "case_id": "merge_first_last_flags",
+      "program": "programs/merge_first_last_flags.txt",
+      "inputs": {
+        "a": "inputs/merge_first_last_flags.a.json",
+        "b": "inputs/merge_first_last_flags.b.json"
+      },
+      "expected": "expected/merge_first_last_flags.json"
+    },
+    {
+      "case_id": "merge_first_last_case_insensitive",
+      "program": "programs/merge_first_last_case_insensitive.txt",
+      "inputs": {
+        "left": "inputs/merge_first_last_case_insensitive.left.json",
+        "right": "inputs/merge_first_last_case_insensitive.right.json"
+      },
+      "expected": "expected/merge_first_last_case_insensitive.json"
+    }
+  ]
+}

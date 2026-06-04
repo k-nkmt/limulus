@@ -41,7 +41,7 @@ health_df = pd.DataFrame({
 
 # Session に参照情報を設定
 session = limulus.Session()
-session.loads({"health": health_data})
+session.loads({"health": health_df})
 ```
 
 ### 2. データステップの実行

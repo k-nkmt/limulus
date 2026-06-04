@@ -4,7 +4,7 @@ from collections.abc import Iterator, Mapping, MutableMapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from ._naming import _dataset_key
+from .naming import _dataset_key
 
 
 @dataclass(frozen=True)

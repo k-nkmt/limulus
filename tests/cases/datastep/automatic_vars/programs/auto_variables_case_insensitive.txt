@@ -1,0 +1,9 @@
+data out;
+  set inp;
+  seq_l = _n_;
+  seq_u = _N_;
+  err_l = _error_;
+  err_u = _ERROR_;
+  output out;
+  keep seq_l seq_u err_l err_u;
+run;

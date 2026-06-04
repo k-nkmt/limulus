@@ -5,7 +5,7 @@ from typing import Any
 
 import pyarrow as pa
 
-from ._naming import _column_key
+from .naming import _column_key
 
 
 def materialize_rebuilt_table(

@@ -1,0 +1,11 @@
+{
+  "datasets": {
+    "out": {
+      "columns": ["name", "sex"],
+      "rows": [
+        ["Alice", "F"],
+        ["Catherine", "F"]
+      ]
+    }
+  }
+}

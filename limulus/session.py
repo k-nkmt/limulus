@@ -1,3 +1,9 @@
+"""Public session and dataset-view APIs for limulus workflows.
+
+This module owns the user-facing session catalog, DATA step submission entry
+points, and the dataset-scoped helper methods that are surfaced in the API docs.
+"""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -8,7 +14,7 @@ from typing import Any
 import pyarrow as pa
 import polars as pl
 
-from ._naming import _column_key, _dataset_key
+from .naming import _column_key, _dataset_key
 from .arrow_bridge import (
     materialize_rebuilt_table,
     polars_result_to_arrow,
@@ -21,9 +27,9 @@ from .column_api import (
     resolve_transpose_var_columns,
     transpose_table as build_transposed_table,
 )
+from .execution import DataStepExecutor
 from .format_registry import FormatRegistry
 from .session_parsing import classify_sql, parse_simple_filter, raise_session_sql_execution_error
-from .runtime import DataStepExecutor
 from .models import (
     DatasetCatalog,
     ExecuteRequest,
@@ -393,8 +399,8 @@ class Session:
 
         Args:
             backend: Preferred backend. One of ``"auto"`` (recommended), ``"python"``, or ``"rust"``.
-                With ``"auto"``, the Rust backend is used when input is an Arrow table; otherwise Python.
-            runtime_backend: Explicit override for the backend. Takes precedence over ``backend``.
+                With ``"auto"``, limulus prefers the Rust runtime when the current workload is supported and falls back to Python otherwise.
+            runtime_backend: Explicit override for runtime selection. Takes precedence over ``backend``.
             parser_backend: Parser backend. Currently only ``"python"`` (lark) is stable.
             options: Session-level option dictionary. These attributes are currently reserved for
                 future use, but are propagated with each submit request.
@@ -402,7 +408,7 @@ class Session:
         Examples:
             >>> import limulus
             >>> session = limulus.Session()
-            >>> session = limulus.Session(backend="python")  # Force Python backend
+            >>> session = limulus.Session(backend="python")
         """
         selected_runtime_backend = runtime_backend or backend
         self._format_registry = FormatRegistry()
@@ -416,8 +422,8 @@ class Session:
         self._last_submit_result: SubmitResult | None = None
         self._options: dict[str, Any] = dict(options or {})
 
-    def register_format(self, name: str, formatter: Any) -> None:
-        self._format_registry.register_format(name, formatter)
+    def register_format(self, name: str, formatter: Any, *, namespace: str | None = None) -> None:
+        self._format_registry.register_format(name, formatter, namespace=namespace)
 
     def register_informat(self, name: str, parser: Any, *, kind: str | None = None) -> None:
         self._format_registry.register_informat(name, parser, kind=kind)
@@ -432,7 +438,7 @@ class Session:
                 - ``pyarrow.Table``
                 - ``polars.DataFrame``
                 - ``pandas.DataFrame``
-                - ``list[dict]`` (list of dicts)
+                - ``list[dict]`` (list of dicts; normalized to Arrow-backed storage)
 
         Examples:
             >>> import limulus, pyarrow as pa
@@ -551,7 +557,15 @@ class Session:
             _original_backend = self._executor._runtime_backend_preference
             self._executor.set_runtime_backend(backend)
         try:
-            response = self._executor.execute(ExecuteRequest(dsl_text=code, options=dict(self._options)))
+            request_options = dict(self._options)
+            if self._format_registry.has_custom_registrations():
+                dispatch_hints = dict(request_options.get("dispatch_hints", {}) or {})
+                dispatch_hints.update(self._format_registry.dispatch_hints())
+                request_options["dispatch_hints"] = dispatch_hints
+                format_catalog_payload = self._format_registry.catalog_payload()
+                if format_catalog_payload:
+                    request_options["format_catalog_payload"] = format_catalog_payload
+            response = self._executor.execute(ExecuteRequest(dsl_text=code, options=request_options))
         finally:
             if backend is not None:
                 self._executor.set_runtime_backend(_original_backend)
@@ -1146,6 +1160,8 @@ class Session:
             pass
 
         if isinstance(data, list):
+            if all(isinstance(item, Mapping) for item in data):
+                return pa.Table.from_pylist(data)
             return data
         return data
 

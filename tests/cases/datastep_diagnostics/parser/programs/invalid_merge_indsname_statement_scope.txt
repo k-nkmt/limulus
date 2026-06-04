@@ -1,0 +1,4 @@
+data out;
+  merge in_a indsname=src;
+  by id;
+run;

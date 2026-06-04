@@ -1,0 +1,54 @@
+{
+  "owner": "validate",
+  "variants": [
+    {
+      "case_id": "validate_reserved_dictionary_output_target",
+      "program": "programs/reserved_dictionary_output_target.txt",
+      "inputs": {
+        "in": "inputs/shared_in.json"
+      },
+      "expected": "expected/reserved_dictionary_output_target.diagnostics.json"
+    },
+    {
+      "case_id": "validate_keep_unknown_column",
+      "program": "programs/keep_unknown_column.txt",
+      "inputs": {
+        "in": "inputs/shared_in.json"
+      },
+      "expected": "expected/keep_unknown_column.diagnostics.json"
+    },
+    {
+      "case_id": "validate_drop_unknown_column",
+      "program": "programs/drop_unknown_column.txt",
+      "inputs": {
+        "in": "inputs/shared_in.json"
+      },
+      "expected": "expected/drop_unknown_column.diagnostics.json"
+    },
+    {
+      "case_id": "validate_rename_unknown_column",
+      "program": "programs/rename_unknown_column.txt",
+      "inputs": {
+        "in": "inputs/shared_in.json"
+      },
+      "expected": "expected/rename_unknown_column.diagnostics.json"
+    },
+    {
+      "case_id": "validate_label_unknown_column",
+      "program": "programs/label_unknown_column.txt",
+      "inputs": {
+        "in": "inputs/shared_in.json"
+      },
+      "expected": "expected/label_unknown_column.diagnostics.json"
+    },
+    {
+      "case_id": "validate_by_unknown_column",
+      "program": "programs/by_unknown_column.txt",
+      "inputs": {
+        "a": "inputs/by_unknown_column.a.json",
+        "b": "inputs/by_unknown_column.b.json"
+      },
+      "expected": "expected/by_unknown_column.diagnostics.json"
+    }
+  ]
+}

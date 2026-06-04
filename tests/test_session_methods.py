@@ -7,7 +7,6 @@ from unittest.mock import patch
 
 from limulus.arrow_bridge import restore_arrow_schema_from_sources
 from limulus import Session
-from limulus.models import ExecuteResponse
 
 
 def _strip_ansi(text: str) -> str:
@@ -367,35 +366,9 @@ def test_session_step_style_methods_resolve_columns_case_insensitively() -> None
     assert session.to_arrow("out").column("amt").type == pa.float32()
 
 
-def test_session_set_option_get_option_and_submit_propagation() -> None:
-    scenario = SESSION_METHOD_SCENARIOS["submit_option_propagation"]
-    session = Session()
-    captured: dict[str, object] = {}
-
-    def fake_execute(request):
-        captured["options"] = request.options
-        return ExecuteResponse(outputs={}, outputs_arrow={})
-
-    session._executor.execute = fake_execute
-    session.set_option(scenario["options"])
-
-    result = session.submit("data out; run;")
-
-    assert result.success is True
-    assert session.get_option("execution.trace") is True
-    assert session.get_option("missing", scenario["expected_missing_default"]) == scenario["expected_missing_default"]
-    assert session.get_option(["execution.trace", "execution.mode", "missing"], default=scenario["expected_missing_default"]) == {
-        "execution.trace": True,
-        "execution.mode": "debug",
-        "missing": scenario["expected_missing_default"],
-    }
-    assert session.get_option() == scenario["options"]
-    assert captured["options"] == scenario["options"]
-
-
 def test_session_include_submits_file_contents(tmp_path) -> None:
     scenario = SESSION_METHOD_SCENARIOS["include_submits_file_contents"]
-    session = Session(runtime_backend="python", parser_backend="python")
+    session = Session()
     session.load("inp", pa.table(scenario["inputs"]["inp"]))
     include_file = tmp_path / "program.dsl"
     include_file.write_text(scenario["dsl"], encoding="utf-8")
@@ -643,7 +616,7 @@ def test_session_dictionary_dataset_helpers_and_reserved_names() -> None:
 
 
 def test_session_dictionary_reflects_submit_outputs_and_unload_removals() -> None:
-    session = Session(runtime_backend="python", parser_backend="python")
+    session = Session()
     session.load("inp", pa.table({"id": [1, 2], "amount": [10, -1]}))
 
     result = session.submit("data out; set inp; if amount > 0 then output out; run;")
@@ -1131,3 +1104,50 @@ def test_session_assign_ignores_function_like_text_inside_string_literals() -> N
     )
 
     assert session["out"].to_pylist() == [{"name": "Alice", "marker": "Alice unknown_func("}]
+
+
+def test_session_assign_supports_substr_scan_compress_trim_functions() -> None:
+    session = Session()
+    session.load(
+        "src",
+        pa.table(
+            {
+                "name": ["Iris-setosa", "Panthera leo"],
+                "phrase": ["one two three", "do re mi"],
+            }
+        ),
+    )
+
+    session.assign(
+        "src",
+        out="out",
+        abbr="substr(name, 1, 3)",
+        suffix="substr(name, 6)",
+        first_word="scan(phrase, 1)",
+        third_word="scan(phrase, 3)",
+        no_spaces="compress(name)",
+        trimmed="trim('trailing   ')",
+    )
+
+    assert session["out"].to_pylist() == [
+        {
+            "name": "Iris-setosa",
+            "phrase": "one two three",
+            "abbr": "Iri",
+            "suffix": "setosa",
+            "first_word": "one",
+            "third_word": "three",
+            "no_spaces": "Iris-setosa",
+            "trimmed": "trailing",
+        },
+        {
+            "name": "Panthera leo",
+            "phrase": "do re mi",
+            "abbr": "Pan",
+            "suffix": "era leo",
+            "first_word": "do",
+            "third_word": "mi",
+            "no_spaces": "Pantheraleo",
+            "trimmed": "trailing",
+        },
+    ]

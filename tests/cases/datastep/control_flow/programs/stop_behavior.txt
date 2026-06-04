@@ -1,0 +1,5 @@
+data out;
+  set in;
+  output out;
+  if id = 2 then stop;
+run;

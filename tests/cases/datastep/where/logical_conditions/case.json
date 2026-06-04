@@ -1,0 +1,55 @@
+{
+  "category": "where",
+  "variants": [
+    {
+      "case_id": "logical_conditions",
+      "program": "program.txt",
+      "inputs": {
+        "inp": "inputs/inp.json"
+      },
+      "expected": "expected/output.json"
+    },
+    {
+      "case_id": "subset_if_filter",
+      "program": "programs/subset_if_filter.txt",
+      "inputs": {
+        "in": "inputs/subset_if_filter.in.json"
+      },
+      "expected": "expected/subset_if_filter.json"
+    },
+    {
+      "case_id": "subset_if_delete_equivalent",
+      "program": "programs/subset_if_delete_equivalent.txt",
+      "inputs": {
+        "in": "inputs/subset_if_filter.in.json"
+      },
+      "expected": "expected/subset_if_filter.json"
+    },
+    {
+      "case_id": "runtime_arithmetic_logical_where",
+      "program": "programs/runtime_arithmetic_logical_where.txt",
+      "inputs": {
+        "in": "inputs/runtime_arithmetic_logical_where.in.json"
+      },
+      "expected": "expected/runtime_arithmetic_logical_where.json"
+    },
+    {
+      "case_id": "statement_where_multi_set",
+      "program": "programs/statement_where_multi_set.txt",
+      "inputs": {
+        "a": "inputs/statement_where_multi_set.a.json",
+        "b": "inputs/statement_where_multi_set.b.json"
+      },
+      "expected": "expected/statement_where_multi_set.json"
+    },
+    {
+      "case_id": "statement_where_merge",
+      "program": "programs/statement_where_merge.txt",
+      "inputs": {
+        "a": "inputs/statement_where_merge.a.json",
+        "b": "inputs/statement_where_merge.b.json"
+      },
+      "expected": "expected/statement_where_merge.json"
+    }
+  ]
+}

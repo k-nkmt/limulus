@@ -1,0 +1,11 @@
+{
+  "datasets": {
+    "out": {
+      "columns": ["grp", "value"],
+      "rows": [
+        ["A", 2],
+        ["B", 3]
+      ]
+    }
+  }
+}

@@ -1,0 +1,4 @@
+data out;
+set in;
+keep id missing;
+run;

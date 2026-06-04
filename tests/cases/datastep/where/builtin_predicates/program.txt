@@ -1,0 +1,4 @@
+data out;
+  set in;
+  where abs(delta) >= 2 and mod(id, 2) = 0 and missing(note);
+run;

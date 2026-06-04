@@ -57,8 +57,7 @@ This means that when multiple blocks are passed at once, the output of an earlie
 
 ### 3. Parsing
 Data Step code is currently parsed using [lark](https://github.com/lark-parser/lark).
-
-The parser builds an internal structured representation that is then shared by both the Python and Rust runtimes. 
+The parser produces a structured internal representation that can be inspected programmatically.  
 
 For example, code like `data out; set iris(in=in1) ; where sepal_length > 5; if species ^= 'setosa'; keep species sepal_length sepal_width ;run;` is currently recognized as the following statement structure:
 
@@ -104,9 +103,11 @@ Dataset name resolution is case-insensitive and handles the `work.` prefix trans
 Row-oriented processing tends to be less efficient than column-oriented processing.  
 To improve execution speed, a Rust-based runtime module is provided.  
 The Rust backend is used by default.  
-However, if a diagnostic error occurs for cases that cannot be handled by the Rust backend (e.g., `apply()`), the Python backend is automatically used as a fallback.
+Supported `apply()` calls do not force a whole-block Python row loop. When the function target can be resolved up front from a string name, the row loop stays on Rust and only the callable invocation crosses a narrow Python gateway. This keeps builtins, dotted module functions, and in-scope helper functions available without restoring broad Python runtime ownership.
 
 Input-stage dataset options such as `keep=`, `drop=`, `where=`, `rename=`, `firstobs=`, and `obs=` are normalized in shared Python-side preprocessing before the runtime loop when needed. This keeps the row-loop semantics consistent across Python and Rust backends without duplicating the same preparation rules in multiple runtimes.
+
+By contrast, `MERGE` preparation and `lag(...)` / `lead(...)` rewrite materialization remain part of `pre-evaluations`. Those steps depend on statement semantics and runtime rewrite planning, not only on source dataset option normalization.
 
 ### 6. Session Helpers and Metadata Views
 
@@ -161,8 +162,9 @@ Handling large datasets is a key motivation for using Python, so performance is 
 Row-oriented processing is inherently slower than columnar processing, which operates on entire columns at once.  
 For that reason, the main Data Step runtime focuses on predictable row-loop semantics, while user-facing helpers such as `assign()` can use a column-oriented expression path for supported syntax.
 
-For reference, limulus uses the following iris-like neutral scenario for benchmark comparisons:  
+For wide or performance-sensitive pure column operations, `assign(...)`, `cast(...)` / `astype(...)`, and direct Arrow / Polars usage are often better fits than forcing row-oriented logic. limulus aims to keep those boundaries explicit rather than promising blanket parity with columnar engines.
 
+For reference, limulus uses the following iris-like neutral scenario for benchmark comparisons:
 
 Processing scenario:
 ```sas
@@ -180,45 +182,52 @@ data setosa_like others;
     output setosa_like;
   end ;
 run;
-
 ```
 
-With the Rust runtime, processing time is reduced to about half compared with the Python backend.  
-Compared with column-oriented processing in pandas or polars, limulus is at a disadvantage because those libraries can process entire columns in bulk. However, when compared against row-wise patterns such as `iterrows`, performance drops sharply in pandas, and the Rust runtime in limulus still runs faster than pandas `iterrows`.  
-For simple operations, using `assign` allows for column-oriented processing, resulting in high performance. You should consider this approach when working with very large datasets.
+For row-oriented execution, limulus is still slower than `polars.iter_rows`, but it remains substantially faster than `pandas.iterrows` for the same workload.
+limulus also carries a fixed overhead of roughly 50 ms for parsing, preprocessing, and related setup work regardless of input size. As the dataset grows and that fixed-cost share becomes smaller, limulus tends to run at about four times the runtime of Polars and about one third of the runtime of pandas for this row-oriented benchmark.
+This comparison uses `pandas.iterrows()`, which is often chosen for its simple column-name-based access even though `pandas.itertuples()` is usually much faster and can be much closer to Polars row iteration performance for the same workload.
 
-| rows | limulus rust(ms) | limulus python(ms) | limulus assign(ms) |pandas(ms) | polars(ms) | pandas iterrows(ms) | polars iterrows(ms) |
-|---:|---:|---:|---:|---:|---:|---:|---:|
-| 10000 | 82.42 | 287.21 | 14.73 |3.24 | 2.80 | 138.39 | 8.07 |
-| 100000 | 813.52 | 2825.89 | 4.96 |7.77 | 2.48 | 1381.17 | 87.31 |
-| 1000000 | 8556.33 | 28125.39 | 101.71 |134.70 | 30.57 | 13851.41 | 861.90 |
+| rows | limulus_ms | pandas_iterrows_ms | polars_iterrows_ms |
+|---:|---:|---:|---:|
+| 10000 | 94.17 | 147.32 | 9.06 |
+| 100000 | 455.67 | 1433.75 | 111.30 |
+| 1000000 | 4220.09  | 14675.22 | 980.06 |
 
+When the same transformation is expressed through `limulus.assign(...)`, performance improves substantially because the helper uses a Polars-based columnar execution path internally. In practice, this makes it much closer to Polars than to row-oriented execution.
+This path also carries a fixed overhead of roughly 50 ms, so it remains somewhat slower than other columnar-style processing at small sizes. However, at around 100k rows it can already run faster than `polars.iter_rows` for the same transformation.
 
----
+| rows | limulus_assign_ms | pandas_ms | polars_ms |
+|---:|---:|---:|---:|
+| 10000 | 54.11 | 1.93 | 0.81 |
+| 100000 | 63.57 | 8.57 | 2.72 |
+| 1000000 | 108.52 | 105.83 | 28.25 |
 
 
 ## Roadmap (Under Consideration)
 
 ### Short-term (v0.x)
 
-- [ ] Improved stability (bug fixes, expanded parser coverage, etc.)
-  Parser/runtime coverage and validation have improved.
-- [ ] Additional supported functions (string-related, `put`, etc.)
+- [ ] Improved stability (bug fixes, expanded parser coverage, etc.)  
+  -> Parser/runtime coverage and validation have improved.
+- [ ] Additional supported functions (string-related, `put`, etc.)  
+  -> Support for `put(...)` and `input(...)` has been added.
 - [x] Broader helper coverage and improved ergonomics around the existing column-oriented API
-- [ ] Performance improvements in non-runtime processing areas
-  Some pipeline cleanup and helper improvements have landed, but more work is still needed.
+- [ ] Performance improvements in non-runtime processing areas  
+  -> Some pipeline cleanup and helper improvements have landed. Data handoff costs were reduced and performance improved, but further code cleanup is still needed.
 - [x] Support for label-based metadata settings
 
 ### Mid-term (beta release v0.x – v1.0)
 
 - [ ] Improved reliability through expanded and organized test coverage
-- [ ] Enhanced logging and debugging capabilities
-  Stage-aware and source-excerpt-based diagnostics are available, but deeper debugging support is still planned.
-- [x] Support for Dataset-JSON
-  [dsjframe](https://github.com/k-nkmt/dsjframe) has been released as a standalone library.
+  -> Migrated tests to a case-based structure for easier integration with other systems.
+- [ ] Enhanced logging and debugging capabilities  
+  -> Stage-aware and source-excerpt-based diagnostics are available, but deeper debugging support is still planned.
+- [x] Support for Dataset-JSON  
+  -> [dsjframe](https://github.com/k-nkmt/dsjframe) has been released as a standalone library.
 
-### Long-term (TBD)
+### Long-term Outlook
 
 - [ ] Support for macro variables and open-code macros
-- [X] Support for dictionary tables
+- [x] Support for dictionary tables
 - [ ] Further runtime performance improvements

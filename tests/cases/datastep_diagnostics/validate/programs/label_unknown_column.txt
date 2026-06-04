@@ -1,0 +1,4 @@
+data out;
+set in;
+label missing = "Missing";
+run;

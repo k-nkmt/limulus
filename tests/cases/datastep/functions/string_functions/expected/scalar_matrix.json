@@ -1,0 +1,11 @@
+{
+  "datasets": {
+    "out": {
+      "columns": ["y_propcase", "y_cat", "y_cats", "y_catt", "y_catx", "y_index", "y_find", "y_tranwrd", "y_translate", "y_length", "y_lengthn", "y_strip", "y_reverse", "y_repeat", "y_countw"],
+      "rows": [
+        ["Hello World", "hello world test", "ab", "hello world", "a-b-c", 7.0, 7.0, "hi world", "Hello World", 11.0, 11.0, "hello world", "dlrow olleh", "ababab", 2.0],
+        ["Foo Bar", "foo bar test", "ab", "hello world", "a-b-c", 0.0, 0.0, "foo bar", "foo bar", 7.0, 7.0, "foo bar", "rab oof", "ababab", 2.0]
+      ]
+    }
+  }
+}

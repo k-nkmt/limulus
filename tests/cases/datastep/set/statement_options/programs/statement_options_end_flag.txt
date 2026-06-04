@@ -1,0 +1,5 @@
+data out;
+  set a b indsname=src end=last;
+  if last then output;
+  keep id src last;
+run;

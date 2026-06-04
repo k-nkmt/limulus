@@ -1,0 +1,13 @@
+{
+  "diagnostics": [
+    {
+      "stage": "execute",
+      "code": "RUNTIME_DATASET_OPTION_INVALID",
+      "severity": "error",
+      "message_fragments": [
+        "Dataset option WHERE= evaluation failed",
+        "invalid syntax"
+      ]
+    }
+  ]
+}

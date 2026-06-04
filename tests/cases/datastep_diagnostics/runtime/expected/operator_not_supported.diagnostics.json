@@ -1,0 +1,13 @@
+{
+  "diagnostics": [
+    {
+      "stage": "execute",
+      "code": "RUNTIME_EXPRESSION_EVALUATION_ERROR",
+      "severity": "error",
+      "message_fragments": [
+        "Rust statement execution failed",
+        "invalid syntax"
+      ]
+    }
+  ]
+}

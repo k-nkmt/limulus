@@ -1,0 +1,8 @@
+{
+  "columns": ["name", "sex"],
+  "rows": [
+    ["Alice", "F"],
+    ["Bob", "M"],
+    ["Catherine", "F"]
+  ]
+}

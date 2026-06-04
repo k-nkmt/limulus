@@ -1,0 +1,15 @@
+{
+  "diagnostics": [
+    {
+      "stage": "resolve outputs",
+      "code": "REQ_INVALID_OUTPUT_TARGETS",
+      "severity": "error",
+      "location": null,
+      "message_fragments": [
+        "output_targets is omitted",
+        "no DATA/OUTPUT target can be resolved"
+      ],
+      "labels": []
+    }
+  ]
+}

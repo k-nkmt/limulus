@@ -1,0 +1,5 @@
+data out_hi out_lo;
+  set in;
+  if amount >= 10 then output out_hi;
+  else output out_lo;
+run;

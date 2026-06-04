@@ -1,0 +1,5 @@
+data out;
+  set a(in=in_a) b(in=in_b);
+  if in_a then output ;
+  keep id;
+run;

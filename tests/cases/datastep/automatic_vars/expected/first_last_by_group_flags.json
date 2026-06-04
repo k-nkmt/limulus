@@ -1,0 +1,12 @@
+{
+  "datasets": {
+    "out": {
+      "columns": ["grp", "id", "first_flag", "last_flag"],
+      "rows": [
+        ["A", 1, 1.0, 0.0],
+        ["A", 2, 0.0, 1.0],
+        ["B", 3, 1.0, 1.0]
+      ]
+    }
+  }
+}

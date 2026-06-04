@@ -1,0 +1,6 @@
+data out;
+  merge a b;
+  by id;
+  where id >= 2;
+  output out;
+run;

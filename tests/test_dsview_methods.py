@@ -197,7 +197,7 @@ def test_dataset_view_astype() -> None:
 
 def test_dataset_view_astype_preserves_arrow_type_on_materialized_view() -> None:
     scenario = DATASET_VIEW_METHOD_SCENARIOS["astype_materialized"]
-    session = Session(runtime_backend="python", parser_backend="python")
+    session = Session()
     session.load("src", pa.table(scenario["inputs"]["src"]))
 
     session.dataset("src").astype({"amount": "float32"}, out="typed_view")

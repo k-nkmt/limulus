@@ -1,0 +1,24 @@
+{
+  "diagnostics": [
+    {
+      "stage": "parse",
+      "code": "PARSE_SET_OPTION_SCOPE_ERROR",
+      "severity": "error",
+      "location": "statement:2",
+      "message_fragments": [
+        "INDSNAME=",
+        "SET statement option"
+      ],
+      "span": {
+        "line": 2,
+        "column": 3
+      },
+      "labels": [
+        {
+          "kind": "primary"
+        }
+      ],
+      "source_text": "data out;\n  merge in_a indsname=src;\n  by id;\nrun;"
+    }
+  ]
+}

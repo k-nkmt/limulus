@@ -1,0 +1,37 @@
+{
+  "category": "output",
+  "variants": [
+    {
+      "case_id": "output_dataset_options_multi_target",
+      "program": "programs/output_dataset_options_multi_target.txt",
+      "inputs": {
+        "ds": "inputs/output_dataset_options_multi_target.ds.json"
+      },
+      "expected": "expected/output_dataset_options_multi_target.json"
+    },
+    {
+      "case_id": "output_dataset_options_python_runtime",
+      "program": "programs/output_dataset_options_python_runtime.txt",
+      "inputs": {
+        "inp": "inputs/output_dataset_options_python_runtime.inp.json"
+      },
+      "expected": "expected/output_dataset_options_python_runtime.json"
+    },
+    {
+      "case_id": "output_e2e_multi_output",
+      "program": "programs/output_e2e_multi_output.txt",
+      "inputs": {
+        "in": "inputs/output_e2e_multi_output.in.json"
+      },
+      "expected": "expected/output_e2e_multi_output.json"
+    },
+    {
+      "case_id": "output_dataset_and_column_labels",
+      "program": "programs/output_dataset_and_column_labels.txt",
+      "inputs": {
+        "inp": "inputs/output_dataset_and_column_labels.inp.json"
+      },
+      "expected": "expected/output_dataset_and_column_labels.json"
+    }
+  ]
+}

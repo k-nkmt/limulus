@@ -1,3 +1,5 @@
+"""Column-oriented helper internals for transpose, assign, and CASE WHEN parsing."""
+
 from __future__ import annotations
 
 import ast
@@ -12,13 +14,13 @@ from lark.exceptions import UnexpectedInput
 import pyarrow as pa
 import polars as pl
 
-from ._naming import _column_key
-from .evaluator import ExpressionEvaluator
+from .naming import _column_key
 from .format_registry import FormatRegistry
 from .lark_support import build_lark_parser_from_file
 from .models import Diagnostic, DiagnosticLabel, DiagnosticSpan, RenderRequest
 from .renderer import render_diagnostics
-from .runtime import PDVRuntimeService
+from .runtime.expressions import ExpressionEvaluator
+from .runtime.row_runtime import RowRuntimeService
 
 
 _ASSIGNMENT_NORMALIZER = ExpressionEvaluator(lambda: {})
@@ -38,6 +40,10 @@ _ASSIGN_FUNCTION_REGISTRY = {
     "length",
     "lengthn",
     "strip",
+    "substr",
+    "scan",
+    "compress",
+    "trim",
     "reverse",
     "repeat",
     "countw",
@@ -773,6 +779,39 @@ def _translate_call_node(node: ast.Call, *, column_names: Sequence[str], format_
     if function_name == _column_key("hour"):
         _require_arity(node.func.id, arg_exprs, expected=1)
         return _expr_hour(arg_exprs[0], format_registry=format_registry)
+    if function_name == _column_key("substr"):
+        if len(arg_exprs) < 2 or len(arg_exprs) > 3:
+            raise ValueError("substr() requires 2 or 3 arguments")
+        start_lit = arg_literals[1]
+        if start_lit is _UNSUPPORTED:
+            raise ValueError("Unsupported function: substr")
+        start_0 = max(int(start_lit) - 1, 0)
+        if len(arg_exprs) == 2:
+            return _as_string_expr(arg_exprs[0]).str.slice(start_0)
+        length_lit = arg_literals[2]
+        if length_lit is _UNSUPPORTED:
+            raise ValueError("Unsupported function: substr")
+        return _as_string_expr(arg_exprs[0]).str.slice(start_0, max(int(length_lit), 0))
+    if function_name == _column_key("trim"):
+        _require_arity(node.func.id, arg_exprs, expected=1)
+        return _expr_trim(arg_exprs[0])
+    if function_name == _column_key("compress"):
+        if len(arg_exprs) < 1 or len(arg_exprs) > 2:
+            raise ValueError("compress() requires 1 or 2 arguments")
+        chars_lit = None if len(arg_literals) == 1 else arg_literals[1]
+        if chars_lit is _UNSUPPORTED:
+            raise ValueError("Unsupported function: compress")
+        return _expr_compress(arg_exprs[0], None if chars_lit is None else str(chars_lit))
+    if function_name == _column_key("scan"):
+        if len(arg_exprs) < 2 or len(arg_exprs) > 3:
+            raise ValueError("scan() requires 2 or 3 arguments")
+        index_lit = arg_literals[1]
+        if index_lit is _UNSUPPORTED:
+            raise ValueError("Unsupported function: scan")
+        delimiters_lit = " " if len(arg_literals) < 3 else arg_literals[2]
+        if delimiters_lit is _UNSUPPORTED:
+            raise ValueError("Unsupported function: scan")
+        return _expr_scan(arg_exprs[0], int(index_lit), str(delimiters_lit))
 
     raise ValueError(f"Unsupported function: {node.func.id}")
 
@@ -897,6 +936,35 @@ def _expr_lengthn(expr: pl.Expr) -> pl.Expr:
     return pl.when(text == "").then(0).otherwise(text.str.len_chars())
 
 
+def _expr_trim(expr: pl.Expr) -> pl.Expr:
+    return _as_string_expr(expr).str.strip_chars_end()
+
+
+def _expr_compress(expr: pl.Expr, chars: str | None = None) -> pl.Expr:
+    source = _as_string_expr(expr)
+    if chars is None:
+        return source.str.replace_all(r"\s", "")
+    result = source
+    for ch in chars:
+        result = result.str.replace_all(re.escape(ch), "", literal=False)
+    return result
+
+
+def _expr_scan(expr: pl.Expr, index: int, delimiters: str = " ") -> pl.Expr:
+    splitter_chars = delimiters or " "
+    splitter_pattern = "[" + re.escape(splitter_chars) + "]+"
+    target_index = index - 1
+
+    def _scan_row(value: Any) -> str:
+        source = "" if value is None else str(value)
+        parts = [p for p in re.split(splitter_pattern, source) if p]
+        if target_index < 0 or target_index >= len(parts):
+            return ""
+        return parts[target_index]
+
+    return _as_string_expr(expr).map_elements(_scan_row, return_dtype=pl.String)
+
+
 def _expr_strip(expr: pl.Expr) -> pl.Expr:
     return _as_string_expr(expr).str.strip_chars()
 
@@ -936,6 +1004,9 @@ def _expr_round(value: pl.Expr, *, unit_expr: pl.Expr, unit_literal: Any) -> pl.
 
 
 def _expr_put(value: pl.Expr, format_name: Any, *, format_registry: FormatRegistry) -> pl.Expr:
+    catalog = format_registry.get_format_catalog(format_name)
+    if catalog is not None:
+        return value.replace_strict(catalog, default=value.cast(pl.Utf8), return_dtype=pl.Utf8)
     return value.map_elements(
         lambda item: format_registry.put(item, format_name),
         return_dtype=pl.Utf8,
@@ -943,6 +1014,9 @@ def _expr_put(value: pl.Expr, format_name: Any, *, format_registry: FormatRegist
 
 
 def _expr_input(value: pl.Expr, informat_name: Any, *, format_registry: FormatRegistry) -> pl.Expr:
+    catalog = format_registry.get_informat_catalog(informat_name)
+    if catalog is not None:
+        return value.replace_strict(catalog, default=pl.lit(None, dtype=pl.Float64), return_dtype=pl.Float64)
     try:
         kind = format_registry.infer_input_kind(informat_name)
     except ValueError:
@@ -988,7 +1062,7 @@ def _evaluate_assignment_spec(
     *,
     row: Mapping[str, Any],
     evaluator: ExpressionEvaluator,
-    runtime: PDVRuntimeService,
+    runtime: RowRuntimeService,
     context: Any,
 ) -> Any:
     if spec.kind == "literal":
@@ -1040,7 +1114,7 @@ def _evaluate_expression_value(
     *,
     row: Mapping[str, Any],
     evaluator: ExpressionEvaluator,
-    runtime: PDVRuntimeService,
+    runtime: RowRuntimeService,
     context: Any,
 ) -> Any:
     unsupported_function = _find_unsupported_function(

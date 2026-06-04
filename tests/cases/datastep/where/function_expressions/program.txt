@@ -1,0 +1,4 @@
+data out;
+  set inp;
+  where lowcase(name) = "alice";
+run;

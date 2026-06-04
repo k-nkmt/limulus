@@ -1,0 +1,38 @@
+{
+  "statements": [
+    {
+      "kind": "DATA"
+    },
+    {
+      "kind": "SKIPPED"
+    },
+    {
+      "kind": "SKIPPED"
+    },
+    {
+      "kind": "SKIPPED"
+    },
+    {
+      "kind": "LABEL",
+      "label_map": {
+        "amount": "Amount"
+      }
+    },
+    {
+      "kind": "SKIPPED"
+    },
+    {
+      "kind": "SET"
+    },
+    {
+      "kind": "SKIPPED",
+      "text": "call missing(var1)"
+    },
+    {
+      "kind": "STOP"
+    },
+    {
+      "kind": "RUN"
+    }
+  ]
+}

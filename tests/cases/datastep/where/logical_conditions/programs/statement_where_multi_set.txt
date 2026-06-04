@@ -1,0 +1,5 @@
+data out;
+  set a b;
+  where id >= 2;
+  output out;
+run;

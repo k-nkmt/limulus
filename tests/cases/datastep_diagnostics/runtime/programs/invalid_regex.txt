@@ -1,0 +1,5 @@
+data out;
+  set in;
+  where prxmatch('/+/', name) = 1;
+  output out;
+run;

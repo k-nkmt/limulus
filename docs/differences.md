@@ -34,9 +34,8 @@ Complex types such as structs that do not exist in SAS are not expected to be us
 Dataset labels and column labels are supported, but they are stored as Arrow metadata rather than as a separate display-layer construct. Dataset labels live in schema metadata under `memlabel`, and column labels live in per-field custom metadata.
 
 ### Dataset Option Type Preservation
-Some row-oriented execution paths materialize rows before the final Arrow table is rebuilt. As a current limitation, Arrow physical types are not always preserved exactly after `SET`-based processing, including cases that use source dataset options such as `firstobs=` or `obs=`. The logical values are preserved, but numeric columns may be widened, for example from `float32` to `float64`.
-
-If exact physical types matter, it is recommended to perform type conversion at the final materialized output stage. In practice, prefer `DatasetView.cast(...)` or `DatasetView.astype(...)` as the last transformation before using the result.
+Physical types are usually preserved through processing.  
+If exact physical types matter, it is still recommended to perform explicit type conversion at the final output stage. In practice, prefer `DatasetView.cast(...)` or `DatasetView.astype(...)` as the last transformation before using the result.
 
 ### SQL API
 `Session.sql()` is available for read-oriented queries, `CREATE TABLE ... AS ...` style result persistence, and `DROP TABLE ...` dataset removal. The feature is backed by the Polars SQL engine and is intended as a practical session-level query helper rather than a full PROC SQL reimplementation.
@@ -69,22 +68,25 @@ Current transpose scope is intentionally narrow:
 
 For `assign()`, string values are interpreted as expressions. To assign a string literal, quote it inside the expression, for example `flag="'A'"`.
 
-`assign()` is now executed through a column-oriented expression pipeline. v04 currently guarantees column-oriented execution for literals, arithmetic / comparison expressions, `case when`, and the built-in function subset `upcase`, `lowcase`, `propcase`, `cat`, `cats`, `catt`, `catx`, `index`, `find`, `tranwrd`, `translate`, `length`, `lengthn`, `strip`, `reverse`, `repeat`, `countw`, `round`, `put`, `input`, and `hour`. Unsupported functions fail explicitly instead of falling back to row-wise Python evaluation.
-
+`assign()` is now executed through a column-oriented expression pipeline. The current release guarantees column-oriented execution for literals, arithmetic / comparison expressions, `case when`, and the built-in functions.
 ### PUT / INPUT Scope
 limulus now provides a limited `put(...)` / `input(...)` helper surface in both helper expressions and the Python runtime.
 
 Current built-in families are:
 
-- numeric to text: `best.`, `w.`, `w.d`, `w.d.`, `zw.`, `zw.d`, `zw.d.`, `commaw.`, `commaw.d`, `commaw.d.`
+- numeric to text: `best.`, `w.d.`, `zw.d`, `zw.d.`, `commaw.d.`
 - text to numeric: `best.`
 - text to date / datetime / time: `e8601da.`, `e8601dt.`, `yymmdd6.`, `yymmdd8.`, `yymmdd10.`, `time.`
-- date / datetime / time to text: `e8601da.`, `e8601dt.`, `time.`
-- decimal-hour extraction: `hour(...)`
+- date / datetime / time to text: `e8601da.`, `e8601dt.`, `yymmdd6.`, `yymmdd8.`, `yymmdd10.`, `time.`
 
 `input(...)` returns Python / Arrow-compatible numeric, `date`, `datetime`, and `time` values rather than date/time numeric values. This is intentionally a practical subset, not a full format catalog.
 
-`Session.register_format(...)` and `Session.register_informat(..., kind=...)` extend the shared session registry used by helper expressions and the Python runtime. This is a Python-side extension hook, not a full replacement for format catalogs.
+`Session.register_format(...)` and `Session.register_informat(...)` now support two extension styles:
+
+- exact-match dict catalogs, which are serializable and can stay on the Rust-first DATA step path when the rest of the workload is eligible
+- callable hooks, which remain Python-side extension points
+
+For dict catalogs, `put(...)` returns text and falls back to the original value on no-match, while `input(...)` returns `null` on no-match. Character custom formats use `$name.` in DATA step syntax but register as `name` plus `namespace="character"` in Python. Dict custom `input(...)` is intentionally float64-only in this phase; broader typed custom informat support is deferred.
 
 ### PROC / Macro Skip Scope
 Some unsupported syntax is skipped before Data Step parsing so mixed legacy source can still be processed.
@@ -160,8 +162,7 @@ Useful for extending functionality not covered by limulus's built-in functions, 
 | SAS language Feature | Notes |
 |---------|------|
 | Attrib | Full ATTRIB parity is not implemented yet; use dataset labels and LABEL statements for supported metadata cases |
-| Numeric format (`PUT(x, 8.2.)`) | Limited built-in `put(...)` support is available for `w.d.`, `commaw.d.`, and `zN`; the broader format catalog is not implemented |
-| Format (`FORMAT`, `INFORMAT`) | Python-side registry hooks are available for advanced usage |
+| Format (`FORMAT`, `INFORMAT`) | Exact-match dict catalogs and Python callable registry hooks are available; SAS `FORMAT` / `INFORMAT` statements are not implemented |
 | Macro variables (`%let`, `&var`) | `%let` / `%put` / `%macro ... %mend` are skipped, not executed; `&var` expansion is not implemented |
 | PROC statements | `proc ... run;` / `proc ... quit;` blocks are skipped so surrounding DATA steps can still be parsed, but procedure semantics are not implemented |
 | `INFILE` / `FILE` | Not planned; handle on the Python side |
@@ -171,7 +172,6 @@ Useful for extending functionality not covered by limulus's built-in functions, 
 | Variable groups (`_numeric_`, `_character_`, `_all_`) | Workarounds available; under consideration |
 | Character operators (e.g., `eq`) | May be implemented if there is demand |
 | CALL subroutines | `symputx` and `missing` are planned |
-| Dictionary tables | Supported for `tables` / `columns`; metadata comes from Arrow schema/field metadata |
 
 In general, features that have no practical workaround and are commonly used will be prioritized.  
 For features that are costly to implement and have good Python-side alternatives, those alternatives are recommended instead, freeing resources for areas like performance.  
@@ -182,7 +182,7 @@ For example, external file I/O (`INFILE` / `FILE`) is well served by pandas, pol
 ## Sorting and Column Reordering
 
 Operations typically performed by procedures such as sorting are executed through the column-oriented API.  
-A high-performance polars-based wrapper is planned, but currently only basic operations are available.  
+The current release exposes practical session-local sorting and column reordering helpers rather than a separate procedure layer.  
 Column reordering can be done with `select` or `keep`.
 
 ```python

@@ -1,0 +1,3 @@
+data out;
+  set in_a in=in_left;
+run;

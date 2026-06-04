@@ -1,0 +1,12 @@
+{
+  "category": "where",
+  "variants": [
+    {
+      "case_id": "function_expressions",
+      "inputs": {
+        "inp": "inputs/inp.json"
+      },
+      "expected": "expected/output.json"
+    }
+  ]
+}

@@ -1,0 +1,41 @@
+{
+  "statements": [
+    {
+      "kind": "DATA"
+    },
+    {
+      "kind": "SET"
+    },
+    {
+      "kind": "IF",
+      "if_spec": {
+        "condition": "amount > 0",
+        "then_action": "output out",
+        "is_subset": false
+      }
+    },
+    {
+      "kind": "ELSE IF",
+      "if_spec": {
+        "condition": "amount == 0",
+        "then_action": "do",
+        "is_then_do": true
+      }
+    },
+    {
+      "kind": "KEEP"
+    },
+    {
+      "kind": "END"
+    },
+    {
+      "kind": "ELSE"
+    },
+    {
+      "kind": "WHERE"
+    },
+    {
+      "kind": "RUN"
+    }
+  ]
+}

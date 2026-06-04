@@ -1,0 +1,10 @@
+{
+  "datasets": {
+    "out": {
+      "columns": ["id", "delta", "note"],
+      "rows": [
+        [2, -2, null]
+      ]
+    }
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "category": "set",
+  "variants": [
+    {
+      "case_id": "statement_options_end_flag",
+      "program": "programs/statement_options_end_flag.txt",
+      "inputs": {
+        "a": "inputs/statement_options_end_flag.a.json",
+        "b": "inputs/statement_options_end_flag.b.json"
+      },
+      "expected": "expected/statement_options_end_flag.json"
+    }
+  ]
+}

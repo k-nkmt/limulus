@@ -1,0 +1,14 @@
+{
+  "diagnostics": [
+    {
+      "stage": "execute",
+      "code": "RUNTIME_EXPRESSION_EVALUATION_ERROR",
+      "severity": "error",
+      "location": "where",
+      "message_fragments": [
+        "Invalid prxmatch pattern",
+        "repetition operator missing expression"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,3 @@
+data out;
+  set in(keep=id amount tmp drop=tmp where=(amount > 10) rename=(amount=amt) firstobs=2 obs=1);
+run;

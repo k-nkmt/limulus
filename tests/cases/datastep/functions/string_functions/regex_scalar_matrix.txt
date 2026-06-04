@@ -1,0 +1,7 @@
+data out;
+  set inp;
+  y_prxmatch = prxmatch('/world/', name);
+  y_prxmatch_ci = prxmatch('/WORLD/i', name);
+  y_prxchange = prxchange('s/world/earth/', 1, name);
+  keep y_prxmatch y_prxmatch_ci y_prxchange;
+run;

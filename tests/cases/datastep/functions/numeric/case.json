@@ -1,0 +1,13 @@
+{
+  "category": "functions",
+  "variants": [
+    {
+      "case_id": "numeric_scalar_core",
+      "program": "programs/numeric_scalar_core.txt",
+      "inputs": {
+        "inp": "inputs/numeric_scalar_core.inp.json"
+      },
+      "expected": "expected/numeric_scalar_core.json"
+    }
+  ]
+}

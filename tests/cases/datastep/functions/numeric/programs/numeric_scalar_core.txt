@@ -1,0 +1,11 @@
+data out;
+  set inp;
+  y_int = int(3.7);
+  y_sum = sum(1, 2, 3);
+  y_mean = mean(2, 4, 6);
+  y_sqrt = sqrt(16);
+  y_log = log(1);
+  y_exp = exp(0);
+  y_sign = sign(-5);
+  keep y_int y_sum y_mean y_sqrt y_log y_exp y_sign;
+run;

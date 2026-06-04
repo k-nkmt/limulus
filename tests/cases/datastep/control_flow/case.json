@@ -1,0 +1,61 @@
+{
+  "category": "control_flow",
+  "variants": [
+    {
+      "case_id": "do_end_loop",
+      "program": "programs/do_end_loop.txt",
+      "inputs": {
+        "in": "inputs/do_end_loop.in.json"
+      },
+      "expected": "expected/do_end_loop.json"
+    },
+    {
+      "case_id": "multi_block_chain",
+      "program": "programs/multi_block_chain.txt",
+      "inputs": {
+        "in": "inputs/multi_block_chain.in.json"
+      },
+      "expected": "expected/multi_block_chain.json"
+    },
+    {
+      "case_id": "stop_behavior",
+      "program": "programs/stop_behavior.txt",
+      "inputs": {
+        "in": "inputs/stop_behavior.in.json"
+      },
+      "expected": "expected/stop_behavior.json"
+    },
+    {
+      "case_id": "if_then_do_else_do",
+      "program": "programs/if_then_do_else_do.txt",
+      "inputs": {
+        "students": "inputs/if_then_do_else_do.students.json"
+      },
+      "expected": "expected/if_then_do_else_do.json"
+    },
+    {
+      "case_id": "runtime_if_else_multi_output",
+      "program": "programs/runtime_if_else_multi_output.txt",
+      "inputs": {
+        "in": "inputs/runtime_if_else_multi_output.in.json"
+      },
+      "expected": "expected/runtime_if_else_multi_output.json"
+    },
+    {
+      "case_id": "runtime_do_assign_sum",
+      "program": "programs/runtime_do_assign_sum.txt",
+      "inputs": {
+        "in": "inputs/runtime_do_assign_sum.in.json"
+      },
+      "expected": "expected/runtime_do_assign_sum.json"
+    },
+    {
+      "case_id": "runtime_if_multi_output_power",
+      "program": "programs/runtime_if_multi_output_power.txt",
+      "inputs": {
+        "in": "inputs/runtime_if_multi_output_power.in.json"
+      },
+      "expected": "expected/runtime_if_multi_output_power.json"
+    }
+  ]
+}

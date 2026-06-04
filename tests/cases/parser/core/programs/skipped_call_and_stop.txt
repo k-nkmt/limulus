@@ -1,0 +1,10 @@
+data out;
+length name 8;
+attrib amount length=8;
+format amount 8.2;
+label amount = "Amount";
+informat amount 8.;
+set inp;
+call missing(var1);
+stop;
+run;

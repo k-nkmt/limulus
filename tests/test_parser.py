@@ -1,165 +1,14 @@
 import unittest
 
 from limulus.parser import ParserExecutionContext, ParserService, RustNativeParserBackend, SplitStageParserService
+from limulus.session_parsing import classify_sql, parse_simple_filter
 
 
 PARSER_SCENARIOS = {
-    "phase1_normalized_ast": {
-        "overview": "Parses phase-1 statements and returns normalized AST kinds",
-        "dsl": (
-            "data out; "
-            "set in; "
-            "if amount > 0 then output out; "
-            "else if amount = 0 then do; keep amount; end; "
-            "else drop amount; "
-            "where amount >= 0; "
-            "run;"
-        ),
-        "expected_kinds": ["DATA", "SET", "IF", "ELSE IF", "KEEP", "END", "ELSE", "WHERE", "RUN"],
-    },
-    "invalid_syntax": {
-        "overview": "Returns diagnostic details for invalid syntax",
-        "dsl": "data out; invalid syntax; run;",
-        "expected_code": "PARSE_UNSUPPORTED_STATEMENT",
-        "expected_location": "statement:2",
-    },
-    "set_options_and_statement_options": {
-        "overview": "Parses dataset IN= options and SET-level INDSNAME=/END= options",
-        "dsl": "data out; set in_a(in=in_left) in_b(in=in_right) indsname=src end=last; run;",
-    },
-    "set_options_parser_based_interleaved": {
-        "overview": "Parses interleaved dataset options and SET statement options via parser structure",
-        "dsl": (
-            "data out; "
-            "set in_a(keep=id amount drop=tmp where=(amount > 0) rename=(amount=amt)) "
-            "in_b(in=in_right keep=id) "
-            "indsname=src end=eof ; "
-            "run;"
-        ),
-    },
-    "merge_end_statement_option": {
-        "overview": "Parses END= as a MERGE statement option",
-        "dsl": "data out; merge a b end=eof; by id; run;",
-    },
-    "merge_options_parser_based_interleaved": {
-        "overview": "Parses interleaved dataset options and MERGE statement options via parser structure",
-        "dsl": (
-            "data out; "
-            "merge in_a(keep=id amount drop=tmp where=(amount > 0) rename=(amount=amt)) "
-            "in_b(in=in_right keep=id) "
-            "end=eof; "
-            "by id; "
-            "run;"
-        ),
-    },
-    "invalid_option_scope": {
-        "overview": "Returns PARSE_SET_OPTION_SCOPE_ERROR when option scope is invalid",
-        "dsl_in_statement_scope": "data out; set in_a in=in_left; run;",
-        "dsl_indsname_dataset_scope": "data out; set in_a(indsname=src); run;",
-        "dsl_merge_indsname_statement_scope": "data out; merge in_a indsname=src; by id; run;",
-    },
-    "set_multiple_inputs_delete": {
-        "overview": "Parses SET with multiple inputs and DELETE statement",
-        "dsl": "data out; set a b c; if amount > 0 then output out; delete; run;",
-        "expected_kinds": ["DATA", "SET", "IF", "DELETE", "RUN"],
-        "expected_inputs": ("a", "b", "c"),
-    },
-    "dataset_options_where_rename_keep_drop": {
-        "overview": "Parses KEEP/DROP/RENAME/WHERE dataset options",
-        "dsl": "data out; set in(keep=id amount drop=tmp where=(amount > 0) rename=(amount=amt) firstobs=2 obs=3); run;",
-    },
-    "data_output_dataset_options": {
-        "overview": "Parses DATA statement output dataset options",
-        "dsl": "data a(keep=id label=\"A\") b(drop=tmp rename=(name=full_name)); set in; run;",
-    },
-    "data_and_label_statements": {
-        "overview": "Parses DATA label option and LABEL statement mappings",
-        "dsl": 'data dm(label="DM"); set inp; label id = "Identifier" amount = "Amount"; run;',
-    },
-    "rename_statement": {
-        "overview": "Parses RENAME statement mapping",
-        "dsl": "data out; set in; rename amount=amt score=score_new; run;",
-    },
-    "rename_statement_with_spaces": {
-        "overview": "Parses RENAME statement with whitespace around equals",
-        "dsl": "data out; set in; rename id = id2 amount = amt; run;",
-    },
-    "case_insensitive_keywords": {
-        "overview": "Parses keywords case-insensitively",
-        "dsl": "DaTa Out; SeT Work.Input; WhErE amount > 0; OuTpUt OUT; RuN;",
-        "expected_kinds": ["DATA", "SET", "WHERE", "OUTPUT", "RUN"],
-    },
     "lark_parser_initialization": {
         "overview": "Lark parser is initialized and parses a basic DATA/SET/RUN block",
         "dsl": "data out; set in; run;",
         "expected_kinds": ["DATA", "SET", "RUN"],
-    },
-    "line_comment": {
-        "overview": "Ignores line comments during parsing",
-        "dsl": "* Comment; data out; set inp; run;",
-    },
-    "block_comment_inline": {
-        "overview": "Ignores inline block comments during parsing",
-        "dsl": "data out; /* block comment */ set inp; run;",
-    },
-    "block_comment_tail": {
-        "overview": "Ignores tail block comments during parsing",
-        "dsl": "data out; set inp; /* block comment */ run;",
-    },
-    "set_options_equals_whitespace": {
-        "overview": "Parses SET options with flexible whitespace around equals",
-        "dsl": (
-            "data out; "
-            "set inp end=eof; "
-            "set inp end = eof; "
-            "set inp end= eof; "
-            "set inp end =eof; "
-            "set inp indsname=src; "
-            "set inp indsname = src; "
-            "set inp(in=flag1); "
-            "set inp(in = flag2); "
-            "set inp(in= flag3); "
-            "set inp(in =flag4); "
-            "run;"
-        ),
-    },
-    "unsupported_as_skipped": {
-        "overview": "Parses unsupported statements as SKIPPED",
-        "dsl": (
-            "data out; "
-            "length name 8; "
-            "attrib amount length=8; "
-            "format amount 8.2; "
-            "label amount = \"Amount\"; "
-            "informat amount 8.; "
-            "set inp; "
-            "run;"
-        ),
-    },
-    "call_statement_as_skipped": {
-        "overview": "Parses CALL statements as SKIPPED",
-        "dsl": "data out; set inp; call missing(var1); run;",
-    },
-    "stop_statement": {
-        "overview": "Parses STOP statement as executable STOP kind",
-        "dsl": "data out; set in; stop; run;",
-        "expected_kinds": ["DATA", "SET", "STOP", "RUN"],
-    },
-    "if_structured_spec": {
-        "overview": "Parses structured IF metadata for subset IF and IF THEN action",
-        "dsl": "data out; set in; if amount > 0; if amount = 0 then output out; run;",
-    },
-    "if_structured_keyword_ops": {
-        "overview": "Parses IF metadata and normalizes keyword operators through the structured parser",
-        "dsl": "data out; set in; if amount eq 0 and not flag; if score ^= 1 or amount le 10 then output out; run;",
-    },
-    "do_array_structured_spec": {
-        "overview": "Parses structured DO/ARRAY metadata",
-        "dsl": "data out; set in; array vars[*] a b c; do i = 1 to 3; output out; end; run;",
-    },
-    "do_array_structured_spec_numeric_and_char": {
-        "overview": "Parses numeric ARRAY size, character marker, and expression DO bounds",
-        "dsl": "data out; set in; array names 3 $ first second third; do idx = start + 1 to finish - 1; end; run;",
     },
 }
 
@@ -186,147 +35,20 @@ class ParserServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.parser = ParserService()
 
-    def test_accepts_phase1_statements_and_returns_normalized_ast(self) -> None:
-        scenario = PARSER_SCENARIOS["phase1_normalized_ast"]
-        dsl_text = scenario["dsl"]
-
-        result = self.parser.parse(dsl_text)
-
-        self.assertFalse(result.has_errors)
-        self.assertEqual(
-            [statement.kind for statement in result.ast.statements],
-            scenario["expected_kinds"],
-        )
-
-    def test_returns_diagnostics_with_kind_position_and_cause_on_invalid_syntax(self) -> None:
-        scenario = PARSER_SCENARIOS["invalid_syntax"]
-        dsl_text = scenario["dsl"]
-
-        result = self.parser.parse(dsl_text)
-
-        self.assertTrue(result.has_errors)
-        self.assertEqual(result.diagnostics[0].code, scenario["expected_code"])
-        self.assertEqual(result.diagnostics[0].severity, "error")
-        self.assertEqual(result.diagnostics[0].location, scenario["expected_location"])
-        self.assertTrue(
-            "invalid syntax" in result.diagnostics[0].message
-            or "near line" in result.diagnostics[0].message
-        )
-
-    def test_invalid_syntax_diagnostic_includes_span_label_and_source(self) -> None:
-        scenario = PARSER_SCENARIOS["invalid_syntax"]
-        dsl_text = scenario["dsl"]
-
-        result = self.parser.parse(dsl_text)
-
-        self.assertTrue(result.has_errors)
-        diagnostic = result.diagnostics[0]
-        self.assertIsNotNone(diagnostic.span)
-        assert diagnostic.span is not None
-        self.assertEqual(diagnostic.span.line, 1)
-        self.assertEqual(diagnostic.span.column, 11)
-        self.assertEqual(diagnostic.span.start, 10)
-        self.assertGreaterEqual(diagnostic.span.end, diagnostic.span.start)
-        self.assertEqual(diagnostic.source_text, dsl_text)
-        self.assertEqual(len(diagnostic.labels), 1)
-        self.assertEqual(diagnostic.labels[0].kind, "primary")
-        self.assertEqual(diagnostic.labels[0].span, diagnostic.span)
-
-    def test_parses_set_dataset_ref_options_and_set_statement_options_with_scope_boundary(self) -> None:
-        scenario = PARSER_SCENARIOS["set_options_and_statement_options"]
-        dsl_text = scenario["dsl"]
-
-        result = self.parser.parse(dsl_text)
-
-        self.assertFalse(result.has_errors)
-        set_statement = next(statement for statement in result.ast.statements if statement.kind == "SET")
-        self.assertEqual(tuple(ref.name for ref in set_statement.dataset_refs), ("in_a", "in_b"))
-        self.assertEqual(set_statement.dataset_refs[0].options.in_var, "in_left")
-        self.assertEqual(set_statement.dataset_refs[1].options.in_var, "in_right")
-        self.assertEqual(set_statement.statement_options.indsname_var, "src")
-        self.assertEqual(set_statement.statement_options.end_var, "last")
-
-    def test_parses_set_dataset_options_with_interleaved_statement_options(self) -> None:
-        scenario = PARSER_SCENARIOS["set_options_parser_based_interleaved"]
-        result = self.parser.parse(scenario["dsl"])
-
-        self.assertFalse(result.has_errors)
-        set_statement = next(statement for statement in result.ast.statements if statement.kind == "SET")
-        self.assertEqual(set_statement.statement_options.end_var, "eof")
-        self.assertEqual(set_statement.statement_options.indsname_var, "src")
-
-        first_options = set_statement.dataset_refs[0].options
-        self.assertEqual(first_options.keep_vars, ("id", "amount"))
-        self.assertEqual(first_options.drop_vars, ("tmp",))
-        self.assertEqual(first_options.rename_map, {"amount": "amt"})
-        self.assertEqual(first_options.where_expr, "amount > 0")
-
-        second_options = set_statement.dataset_refs[1].options
-        self.assertEqual(second_options.in_var, "in_right")
-        self.assertEqual(second_options.keep_vars, ("id",))
-
-    def test_returns_parse_set_option_scope_error_for_invalid_option_scope(self) -> None:
-        scenario = PARSER_SCENARIOS["invalid_option_scope"]
-        with_in_as_statement_option = scenario["dsl_in_statement_scope"]
-        with_indsname_as_dataset_option = scenario["dsl_indsname_dataset_scope"]
-        with_merge_indsname_as_statement_option = scenario["dsl_merge_indsname_statement_scope"]
-
-        result_in = self.parser.parse(with_in_as_statement_option)
-        result_inds = self.parser.parse(with_indsname_as_dataset_option)
-        result_merge_inds = self.parser.parse(with_merge_indsname_as_statement_option)
-
-        self.assertTrue(result_in.has_errors)
-        self.assertEqual(result_in.diagnostics[0].code, "PARSE_UNSUPPORTED_STATEMENT")
-        self.assertTrue(result_inds.has_errors)
-        self.assertEqual(result_inds.diagnostics[0].code, "PARSE_SET_OPTION_SCOPE_ERROR")
-        self.assertIn("INDSNAME=", result_inds.diagnostics[0].message)
-        self.assertTrue(result_merge_inds.has_errors)
-        self.assertEqual(result_merge_inds.diagnostics[0].code, "PARSE_SET_OPTION_SCOPE_ERROR")
-
-    def test_option_scope_diagnostic_includes_statement_span(self) -> None:
-        scenario = PARSER_SCENARIOS["invalid_option_scope"]
-
-        result = self.parser.parse(scenario["dsl_indsname_dataset_scope"])
-
-        self.assertTrue(result.has_errors)
-        diagnostic = result.diagnostics[0]
-        self.assertEqual(diagnostic.code, "PARSE_SET_OPTION_SCOPE_ERROR")
-        self.assertIsNotNone(diagnostic.span)
-        assert diagnostic.span is not None
-        self.assertEqual(diagnostic.span.line, 1)
-        self.assertEqual(diagnostic.source_text, scenario["dsl_indsname_dataset_scope"])
-
-    def test_parses_merge_end_statement_option(self) -> None:
-        scenario = PARSER_SCENARIOS["merge_end_statement_option"]
+    def test_lark_parser_is_initialized_and_used(self) -> None:
+        scenario = PARSER_SCENARIOS["lark_parser_initialization"]
+        self.assertIsNotNone(self.parser._lark_parser)
 
         result = self.parser.parse(scenario["dsl"])
 
         self.assertFalse(result.has_errors)
-        merge_statement = next(statement for statement in result.ast.statements if statement.kind == "MERGE")
-        self.assertEqual(tuple(ref.name for ref in merge_statement.dataset_refs), ("a", "b"))
-        self.assertEqual(merge_statement.statement_options.end_var, "eof")
-
-    def test_parses_merge_dataset_options_with_interleaved_statement_options(self) -> None:
-        scenario = PARSER_SCENARIOS["merge_options_parser_based_interleaved"]
-
-        result = self.parser.parse(scenario["dsl"])
-
-        self.assertFalse(result.has_errors)
-        merge_statement = next(statement for statement in result.ast.statements if statement.kind == "MERGE")
-        self.assertEqual(merge_statement.statement_options.end_var, "eof")
-
-        first_options = merge_statement.dataset_refs[0].options
-        self.assertEqual(first_options.keep_vars, ("id", "amount"))
-        self.assertEqual(first_options.drop_vars, ("tmp",))
-        self.assertEqual(first_options.rename_map, {"amount": "amt"})
-        self.assertEqual(first_options.where_expr, "amount > 0")
-
-        second_options = merge_statement.dataset_refs[1].options
-        self.assertEqual(second_options.in_var, "in_right")
-        self.assertEqual(second_options.keep_vars, ("id",))
+        self.assertEqual([statement.kind for statement in result.ast.statements], scenario["expected_kinds"])
 
 
 class SplitStageParserServiceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.parser = ParserService()
+
     def test_extracts_proc_and_macro_skip_regions_via_parser(self) -> None:
         parser = SplitStageParserService()
         dsl_text = """
@@ -358,250 +80,52 @@ class SplitStageParserServiceTests(unittest.TestCase):
         self.assertTrue(any(text.lower().startswith("%macro") for text in skipped_texts))
         self.assertTrue(any(text.lower().startswith("proc sort") for text in skipped_texts))
 
-    def test_parses_set_multiple_inputs_and_delete_statement(self) -> None:
-        scenario = PARSER_SCENARIOS["set_multiple_inputs_delete"]
-        dsl_text = scenario["dsl"]
 
-        result = self.parser.parse(dsl_text)
+class SessionParsingTests(unittest.TestCase):
+    def test_parse_simple_filter_supports_quoted_strings_with_operators(self) -> None:
+        result = parse_simple_filter("src", "status = '>= ready'")
 
-        self.assertFalse(result.has_errors)
-        self.assertEqual(
-            [statement.kind for statement in result.ast.statements],
-            scenario["expected_kinds"],
-        )
-        set_statement = next(statement for statement in result.ast.statements if statement.kind == "SET")
-        self.assertEqual(tuple(ref.name for ref in set_statement.dataset_refs), scenario["expected_inputs"])
+        self.assertEqual(result.variable_name, "status")
+        self.assertEqual(result.operator, "=")
+        self.assertEqual(result.scalar_value, ">= ready")
 
-    def test_parses_dataset_options_where_rename_keep_drop(self) -> None:
-        scenario = PARSER_SCENARIOS["dataset_options_where_rename_keep_drop"]
-        dsl_text = scenario["dsl"]
+    def test_parse_simple_filter_rejects_unquoted_string_literal(self) -> None:
+        with self.assertRaisesRegex(ValueError, "SESSION_FILTER_PARSE_ERROR"):
+            parse_simple_filter("src", "status = ready")
 
-        result = self.parser.parse(dsl_text)
+    def test_classify_sql_identifies_create_table_and_rewrites_dictionary_reference(self) -> None:
+        result = classify_sql("create table out as select * from dictionary.columns where memname = 'SRC'")
 
-        self.assertFalse(result.has_errors)
-        set_statement = next(statement for statement in result.ast.statements if statement.kind == "SET")
-        options = set_statement.dataset_refs[0].options
-        self.assertEqual(options.keep_vars, ("id", "amount"))
-        self.assertEqual(options.drop_vars, ("tmp",))
-        self.assertEqual(options.rename_map, {"amount": "amt"})
-        self.assertEqual(options.where_expr, "amount > 0")
-        self.assertEqual(options.firstobs, 2)
-        self.assertEqual(options.obs, 3)
+        self.assertEqual(result.kind, "create_table")
+        self.assertEqual(result.target, "out")
+        self.assertIn('from "dictionary.columns"', result.query)
 
-    def test_parses_data_output_dataset_options(self) -> None:
-        scenario = PARSER_SCENARIOS["data_output_dataset_options"]
-        dsl_text = scenario["dsl"]
+    def test_classify_sql_identifies_drop_table_with_work_prefix(self) -> None:
+        result = classify_sql("drop table work.out;")
 
-        result = self.parser.parse(dsl_text)
+        self.assertEqual(result.kind, "drop_table")
+        self.assertEqual(result.target, "work.out")
 
-        self.assertFalse(result.has_errors)
-        data_statement = next(statement for statement in result.ast.statements if statement.kind == "DATA")
-        self.assertEqual(tuple(ref.name for ref in data_statement.dataset_refs), ("a", "b"))
-        self.assertEqual(data_statement.dataset_refs[0].options.keep_vars, ("id",))
-        self.assertEqual(data_statement.dataset_refs[0].options.label, "A")
-        self.assertEqual(data_statement.dataset_refs[1].options.drop_vars, ("tmp",))
-        self.assertEqual(data_statement.dataset_refs[1].options.rename_map, {"name": "full_name"})
+    def test_classify_sql_defaults_to_select_and_preserves_underscore_alias(self) -> None:
+        result = classify_sql("select * from dictionary_columns order by memname")
 
-    def test_parses_data_label_option_and_label_statement(self) -> None:
-        scenario = PARSER_SCENARIOS["data_and_label_statements"]
+        self.assertEqual(result.kind, "select")
+        self.assertIsNone(result.target)
+        self.assertEqual(result.query, "select * from dictionary_columns order by memname")
 
-        result = self.parser.parse(scenario["dsl"])
+    def test_classify_sql_rewrites_dictionary_reference_only_outside_string_literals(self) -> None:
+        result = classify_sql("select 'dictionary.columns' as label from dictionary.columns")
 
-        self.assertFalse(result.has_errors)
-        data_statement = next(statement for statement in result.ast.statements if statement.kind == "DATA")
-        label_statement = next(statement for statement in result.ast.statements if statement.kind == "LABEL")
+        self.assertEqual(result.kind, "select")
+        self.assertEqual(result.query, "select 'dictionary.columns' as label from \"dictionary.columns\"")
 
-        self.assertEqual(data_statement.dataset_refs[0].options.label, "DM")
-        self.assertEqual(label_statement.label_map, {"id": "Identifier", "amount": "Amount"})
+    def test_classify_sql_rejects_invalid_drop_table_form(self) -> None:
+        with self.assertRaisesRegex(ValueError, "SESSION_SQL_CLASSIFICATION_ERROR"):
+            classify_sql("drop table")
 
-    def test_parses_rename_statement(self) -> None:
-        scenario = PARSER_SCENARIOS["rename_statement"]
-        dsl_text = scenario["dsl"]
-
-        result = self.parser.parse(dsl_text)
-
-        self.assertFalse(result.has_errors)
-        rename_statement = next(statement for statement in result.ast.statements if statement.kind == "RENAME")
-        self.assertEqual(rename_statement.rename_map, {"amount": "amt", "score": "score_new"})
-
-    def test_parses_rename_statement_with_whitespace_around_equals(self) -> None:
-        scenario = PARSER_SCENARIOS["rename_statement_with_spaces"]
-        dsl_text = scenario["dsl"]
-
-        result = self.parser.parse(dsl_text)
-
-        self.assertFalse(result.has_errors)
-        rename_statement = next(statement for statement in result.ast.statements if statement.kind == "RENAME")
-        self.assertEqual(rename_statement.rename_map, {"id": "id2", "amount": "amt"})
-
-    def test_parses_keywords_case_insensitively(self) -> None:
-        scenario = PARSER_SCENARIOS["case_insensitive_keywords"]
-        dsl_text = scenario["dsl"]
-
-        result = self.parser.parse(dsl_text)
-
-        self.assertFalse(result.has_errors)
-        self.assertEqual(
-            [statement.kind for statement in result.ast.statements],
-            scenario["expected_kinds"],
-        )
-
-    def test_lark_parser_is_initialized_and_used(self) -> None:
-        scenario = PARSER_SCENARIOS["lark_parser_initialization"]
-        self.assertIsNotNone(self.parser._lark_parser)
-
-        result = self.parser.parse(scenario["dsl"])
-
-        self.assertFalse(result.has_errors)
-        self.assertEqual([statement.kind for statement in result.ast.statements], scenario["expected_kinds"])
-
-    def test_parses_line_comment(self) -> None:
-        scenario = PARSER_SCENARIOS["line_comment"]
-        dsl_text = scenario["dsl"]
-
-        result = self.parser.parse(dsl_text)
-
-        self.assertFalse(result.has_errors)
-        self.assertEqual([statement.kind for statement in result.ast.statements], ["DATA", "SET", "RUN"])
-
-    def test_parses_block_comment_inline(self) -> None:
-        scenario = PARSER_SCENARIOS["block_comment_inline"]
-        dsl_text = scenario["dsl"]
-
-        result = self.parser.parse(dsl_text)
-
-        self.assertFalse(result.has_errors)
-        self.assertEqual([statement.kind for statement in result.ast.statements], ["DATA", "SET", "RUN"])
-
-    def test_parses_block_comment_tail(self) -> None:
-        scenario = PARSER_SCENARIOS["block_comment_tail"]
-        dsl_text = scenario["dsl"]
-
-        result = self.parser.parse(dsl_text)
-
-        self.assertFalse(result.has_errors)
-        self.assertEqual([statement.kind for statement in result.ast.statements], ["DATA", "SET", "RUN"])
-
-    def test_parses_set_statement_options_with_whitespace_around_equals(self) -> None:
-        scenario = PARSER_SCENARIOS["set_options_equals_whitespace"]
-        dsl_text = scenario["dsl"]
-
-        result = self.parser.parse(dsl_text)
-
-        self.assertFalse(result.has_errors)
-        set_statements = [statement for statement in result.ast.statements if statement.kind == "SET"]
-        self.assertEqual(set_statements[0].statement_options.end_var, "eof")
-        self.assertEqual(set_statements[1].statement_options.end_var, "eof")
-        self.assertEqual(set_statements[2].statement_options.end_var, "eof")
-        self.assertEqual(set_statements[3].statement_options.end_var, "eof")
-        self.assertEqual(set_statements[4].statement_options.indsname_var, "src")
-        self.assertEqual(set_statements[5].statement_options.indsname_var, "src")
-        self.assertEqual(set_statements[6].dataset_refs[0].options.in_var, "flag1")
-        self.assertEqual(set_statements[7].dataset_refs[0].options.in_var, "flag2")
-        self.assertEqual(set_statements[8].dataset_refs[0].options.in_var, "flag3")
-        self.assertEqual(set_statements[9].dataset_refs[0].options.in_var, "flag4")
-
-    def test_parses_unsupported_statements_as_skipped(self) -> None:
-        scenario = PARSER_SCENARIOS["unsupported_as_skipped"]
-        dsl_text = scenario["dsl"]
-
-        result = self.parser.parse(dsl_text)
-
-        self.assertFalse(result.has_errors)
-        skipped = [statement for statement in result.ast.statements if statement.kind == "SKIPPED"]
-        self.assertEqual(len(skipped), 4)
-        labels = [statement for statement in result.ast.statements if statement.kind == "LABEL"]
-        self.assertEqual(len(labels), 1)
-
-    def test_parses_call_statement_as_skipped(self) -> None:
-        scenario = PARSER_SCENARIOS["call_statement_as_skipped"]
-        result = self.parser.parse(scenario["dsl"])
-
-        self.assertFalse(result.has_errors)
-        skipped = [statement for statement in result.ast.statements if statement.kind == "SKIPPED"]
-        self.assertEqual(len(skipped), 1)
-        self.assertIn("call", skipped[0].text.lower())
-
-    def test_parses_stop_statement(self) -> None:
-        scenario = PARSER_SCENARIOS["stop_statement"]
-        result = self.parser.parse(scenario["dsl"])
-
-        self.assertFalse(result.has_errors)
-        self.assertEqual([statement.kind for statement in result.ast.statements], scenario["expected_kinds"])
-
-    def test_parses_if_structured_metadata(self) -> None:
-        scenario = PARSER_SCENARIOS["if_structured_spec"]
-        result = self.parser.parse(scenario["dsl"])
-
-        self.assertFalse(result.has_errors)
-        if_statements = [statement for statement in result.ast.statements if statement.kind == "IF"]
-        self.assertEqual(len(if_statements), 2)
-
-        subset_if = if_statements[0]
-        self.assertIsNotNone(subset_if.if_spec)
-        self.assertTrue(subset_if.if_spec.is_subset)
-        self.assertEqual(subset_if.if_spec.condition, "amount > 0")
-        self.assertIsNone(subset_if.if_spec.then_action)
-
-        then_if = if_statements[1]
-        self.assertIsNotNone(then_if.if_spec)
-        self.assertFalse(then_if.if_spec.is_subset)
-        self.assertEqual(then_if.if_spec.condition, "amount == 0")
-        self.assertEqual(then_if.if_spec.then_action, "output out")
-
-    def test_parses_if_keyword_operator_normalization_via_structured_parser(self) -> None:
-        scenario = PARSER_SCENARIOS["if_structured_keyword_ops"]
-        result = self.parser.parse(scenario["dsl"])
-
-        self.assertFalse(result.has_errors)
-        if_statements = [statement for statement in result.ast.statements if statement.kind == "IF"]
-        self.assertEqual(len(if_statements), 2)
-
-        subset_if = if_statements[0]
-        self.assertEqual(subset_if.if_spec.condition, "amount == 0 and not flag")
-        self.assertTrue(subset_if.if_spec.is_subset)
-
-        then_if = if_statements[1]
-        self.assertEqual(then_if.if_spec.condition, "score != 1 or amount <= 10")
-        self.assertEqual(then_if.if_spec.then_action, "output out")
-
-    def test_parses_do_and_array_structured_metadata(self) -> None:
-        scenario = PARSER_SCENARIOS["do_array_structured_spec"]
-        result = self.parser.parse(scenario["dsl"])
-
-        self.assertFalse(result.has_errors)
-        array_statement = next(statement for statement in result.ast.statements if statement.kind == "ARRAY")
-        do_statement = next(statement for statement in result.ast.statements if statement.kind == "DO")
-
-        self.assertIsNotNone(array_statement.array_spec)
-        self.assertEqual(array_statement.array_spec.array_name, "vars")
-        self.assertEqual(array_statement.array_spec.variables, ("a", "b", "c"))
-        self.assertTrue(array_statement.array_spec.wildcard_size)
-
-        self.assertIsNotNone(do_statement.do_spec)
-        self.assertEqual(do_statement.do_spec.loop_var, "i")
-        self.assertEqual(do_statement.do_spec.start_expr, "1")
-        self.assertEqual(do_statement.do_spec.end_expr, "3")
-
-    def test_parses_numeric_character_array_and_expression_do_bounds(self) -> None:
-        scenario = PARSER_SCENARIOS["do_array_structured_spec_numeric_and_char"]
-        result = self.parser.parse(scenario["dsl"])
-
-        self.assertFalse(result.has_errors)
-        array_statement = next(statement for statement in result.ast.statements if statement.kind == "ARRAY")
-        do_statement = next(statement for statement in result.ast.statements if statement.kind == "DO")
-
-        self.assertIsNotNone(array_statement.array_spec)
-        self.assertEqual(array_statement.array_spec.array_name, "names")
-        self.assertEqual(array_statement.array_spec.variables, ("first", "second", "third"))
-        self.assertEqual(array_statement.array_spec.declared_size, 3)
-        self.assertFalse(array_statement.array_spec.wildcard_size)
-        self.assertTrue(array_statement.array_spec.character_array)
-
-        self.assertIsNotNone(do_statement.do_spec)
-        self.assertEqual(do_statement.do_spec.loop_var, "idx")
-        self.assertEqual(do_statement.do_spec.start_expr, "start + 1")
-        self.assertEqual(do_statement.do_spec.end_expr, "finish - 1")
+    def test_classify_sql_rejects_invalid_create_table_form(self) -> None:
+        with self.assertRaisesRegex(ValueError, "SESSION_SQL_CLASSIFICATION_ERROR"):
+            classify_sql("create table out select * from src")
 
 
 class ParserNativeIntegrationTests(unittest.TestCase):

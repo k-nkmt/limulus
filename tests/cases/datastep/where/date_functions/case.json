@@ -1,0 +1,21 @@
+{
+  "category": "where",
+  "variants": [
+    {
+      "case_id": "date_functions",
+      "program": "native.txt",
+      "inputs": {
+        "in": "inputs/shared.json"
+      },
+      "expected": "expected/shared.json"
+    },
+    {
+      "case_id": "session_date_functions",
+      "program": "session.txt",
+      "inputs": {
+        "in": "inputs/shared.json"
+      },
+      "expected": "expected/shared.json"
+    }
+  ]
+}

@@ -1,3 +1,9 @@
+"""Top-level public imports for the limulus workflow surface.
+
+Import from here when you want the stable user-facing entry points such as
+``Session``, ``submit(...)``, and ``run(...)``.
+"""
+
 from __future__ import annotations
 
 from typing import Any
@@ -5,9 +11,9 @@ from typing import Any
 # Public API
 from .session import Session
 from .models import DatasetCatalog, LogEntry, SubmitResult
+from .execution import DataStepExecutor, FormatSupportResult, RuntimeRequirements
 
 # Internal / legacy API (still importable for advanced use and internal benchmarks)
-from .runtime import DataStepExecutor, FormatSupportResult, RuntimeRequirements
 from .io_adapters import (
     DataAdapterError,
     DataFrameAdapterPandas,

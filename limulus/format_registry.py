@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 
@@ -10,32 +10,115 @@ _Z_FORMAT = re.compile(r"^z(\d+)(?:\.(\d+))?$", re.IGNORECASE)
 _WD_FORMAT = re.compile(r"^(\d+)(?:\.(\d+))?$")
 _COMMA_WD_FORMAT = re.compile(r"^comma(\d+)(?:\.(\d+))?$", re.IGNORECASE)
 _YYMMDD_FORMAT = re.compile(r"^yymmdd(6|8|10)$", re.IGNORECASE)
+_NUMERIC_NAMESPACE = "numeric"
+_CHARACTER_NAMESPACE = "character"
 
 
 class FormatRegistry:
     def __init__(self) -> None:
-        self._formatters: dict[str, Callable[[Any], Any]] = {}
+        self._formatters: dict[tuple[str, str], Callable[[Any], Any]] = {}
+        self._format_catalogs: dict[tuple[str, str], dict[Any, str | None]] = {}
         self._informats: dict[str, Callable[[Any], Any]] = {}
+        self._informat_catalogs: dict[str, dict[Any, float | None]] = {}
         self._informat_kinds: dict[str, str] = {}
 
-    def register_format(self, name: str, formatter: Callable[[Any], Any]) -> None:
-        self._formatters[self.normalize_name(name)] = formatter
+    def register_format(
+        self,
+        name: str,
+        formatter: Callable[[Any], Any] | Mapping[Any, Any],
+        *,
+        namespace: str | None = None,
+    ) -> None:
+        normalized_name, normalized_namespace = self._normalize_format_spec(name, namespace=namespace)
+        catalog_key = (normalized_namespace, normalized_name)
+        if callable(formatter):
+            self._formatters[catalog_key] = formatter
+            return
+        if not isinstance(formatter, Mapping):
+            raise TypeError("register_format() expects a callable formatter or mapping catalog")
+        self._format_catalogs[catalog_key] = {
+            key: self._coerce_put_output(value)
+            for key, value in formatter.items()
+        }
 
-    def register_informat(self, name: str, parser: Callable[[Any], Any], *, kind: str | None = None) -> None:
+    def register_informat(self, name: str, parser: Callable[[Any], Any] | Mapping[Any, Any], *, kind: str | None = None) -> None:
         normalized = self.normalize_name(name)
-        self._informats[normalized] = parser
-        if kind is not None:
-            self._informat_kinds[normalized] = kind.strip().lower()
+        if callable(parser):
+            self._informats[normalized] = parser
+            if kind is not None:
+                self._informat_kinds[normalized] = kind.strip().lower()
+            return
+        if not isinstance(parser, Mapping):
+            raise TypeError("register_informat() expects a callable parser or mapping catalog")
+        self._informat_catalogs[normalized] = {
+            key: self._coerce_informat_output(value)
+            for key, value in parser.items()
+        }
+        self._informat_kinds[normalized] = "float64"
+
+    def has_custom_registrations(self) -> bool:
+        return bool(self._formatters or self._format_catalogs or self._informats or self._informat_catalogs)
+
+    def has_callable_registrations(self) -> bool:
+        return bool(self._formatters or self._informats)
+
+    def has_dict_catalogs(self) -> bool:
+        return bool(self._format_catalogs or self._informat_catalogs)
+
+    def dispatch_hints(self) -> dict[str, bool]:
+        return {
+            "has_custom_format_registry": self.has_custom_registrations(),
+            "has_callable_format_registry": self.has_callable_registrations(),
+            "has_dict_format_catalogs": self.has_dict_catalogs(),
+        }
+
+    def catalog_payload(self) -> dict[str, Any]:
+        if not self.has_dict_catalogs():
+            return {}
+        numeric_formats: dict[str, dict[Any, str | None]] = {}
+        character_formats: dict[str, dict[Any, str | None]] = {}
+        for (namespace, name), catalog in self._format_catalogs.items():
+            if namespace == _CHARACTER_NAMESPACE:
+                character_formats[name] = dict(catalog)
+            else:
+                numeric_formats[name] = dict(catalog)
+        return {
+            "formats": {
+                _NUMERIC_NAMESPACE: numeric_formats,
+                _CHARACTER_NAMESPACE: character_formats,
+            },
+            "informats": {
+                name: dict(catalog)
+                for name, catalog in self._informat_catalogs.items()
+            },
+        }
+
+    def get_format_catalog(self, format_name: Any) -> dict[Any, str | None] | None:
+        normalized_name, normalized_namespace = self._normalize_format_spec(format_name)
+        return self._format_catalogs.get((normalized_namespace, normalized_name))
+
+    def get_informat_catalog(self, informat_name: Any) -> dict[Any, float | None] | None:
+        return self._informat_catalogs.get(self.normalize_name(informat_name))
 
     def put(self, value: Any, format_name: Any) -> Any:
         if value is None:
             return None
 
         raw_text = self._coerce_name_text(format_name)
-        normalized = self.normalize_name(raw_text)
-        formatter = self._formatters.get(normalized)
+        normalized, namespace = self._normalize_format_spec(raw_text)
+        formatter = self._formatters.get((namespace, normalized))
         if formatter is not None:
             return formatter(value)
+
+        catalog = self._format_catalogs.get((namespace, normalized))
+        if catalog is not None:
+            matched = catalog.get(value)
+            if matched is not None:
+                return matched
+            return self._coerce_put_output(value)
+
+        if namespace != _NUMERIC_NAMESPACE:
+            raise ValueError(f"Unsupported format: {format_name}")
 
         if self._requires_numeric_format_dot(raw_text, normalized):
             raise ValueError(f"Unsupported format: {format_name}")
@@ -67,6 +150,10 @@ class FormatRegistry:
         if normalized == "best":
             return self._format_best(value)
 
+        yymmdd_match = _YYMMDD_FORMAT.fullmatch(normalized)
+        if yymmdd_match is not None:
+            return self._format_yymmdd(self._coerce_date(value), width=int(yymmdd_match.group(1)))
+
         if normalized == "e8601da":
             return self._coerce_date(value).isoformat()
         if normalized == "e8601dt":
@@ -86,6 +173,10 @@ class FormatRegistry:
         parser = self._informats.get(normalized)
         if parser is not None:
             return parser(value)
+
+        catalog = self._informat_catalogs.get(normalized)
+        if catalog is not None:
+            return catalog.get(value)
 
         if normalized == "e8601da":
             return self._coerce_date(value)
@@ -116,6 +207,8 @@ class FormatRegistry:
 
     def infer_input_kind(self, informat_name: Any) -> str:
         normalized = self.normalize_name(informat_name)
+        if normalized in self._informat_catalogs:
+            return "float64"
         registered_kind = self._informat_kinds.get(normalized)
         if registered_kind is not None:
             return registered_kind
@@ -132,10 +225,30 @@ class FormatRegistry:
     @staticmethod
     def normalize_name(name: Any) -> str:
         normalized = FormatRegistry._coerce_name_text(name)
+        if normalized.startswith("$"):
+            normalized = normalized[1:]
 
         if normalized.endswith("."):
             normalized = normalized[:-1]
         return normalized.lower()
+
+    @staticmethod
+    def _normalize_format_spec(name: Any, *, namespace: str | None = None) -> tuple[str, str]:
+        raw_text = FormatRegistry._coerce_name_text(name)
+        inferred_namespace = _CHARACTER_NAMESPACE if raw_text.startswith("$") else _NUMERIC_NAMESPACE
+        normalized_name = raw_text[1:] if raw_text.startswith("$") else raw_text
+        if normalized_name.endswith("."):
+            normalized_name = normalized_name[:-1]
+        return normalized_name.lower(), FormatRegistry._normalize_namespace(namespace or inferred_namespace)
+
+    @staticmethod
+    def _normalize_namespace(namespace: Any) -> str:
+        normalized = str(namespace).strip().lower()
+        if normalized in {_NUMERIC_NAMESPACE, "num", "numeric_format"}:
+            return _NUMERIC_NAMESPACE
+        if normalized in {_CHARACTER_NAMESPACE, "char", "$", "character_format"}:
+            return _CHARACTER_NAMESPACE
+        raise ValueError(f"Unsupported format namespace: {namespace}")
 
     @staticmethod
     def _coerce_name_text(name: Any) -> str:
@@ -187,6 +300,24 @@ class FormatRegistry:
         return str(numeric_value)
 
     @staticmethod
+    def _coerce_put_output(value: Any) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, dt.datetime):
+            return value.replace(microsecond=0).isoformat(timespec="seconds")
+        if isinstance(value, dt.date):
+            return value.isoformat()
+        if isinstance(value, dt.time):
+            return value.replace(microsecond=0).isoformat(timespec="seconds")
+        return str(value)
+
+    @staticmethod
+    def _coerce_informat_output(value: Any) -> float | None:
+        if value is None:
+            return None
+        return float(value)
+
+    @staticmethod
     def _parse_best(value: Any) -> float:
         text = str(value).strip()
         return float(text)
@@ -236,4 +367,14 @@ class FormatRegistry:
             return dt.datetime.strptime(text, "%Y%m%d").date()
         if width == 10:
             return dt.datetime.strptime(text, "%Y-%m-%d").date()
+        raise ValueError(f"Unsupported yymmdd width: {width}")
+
+    @staticmethod
+    def _format_yymmdd(value: dt.date, *, width: int) -> str:
+        if width == 6:
+            return value.strftime("%y%m%d")
+        if width == 8:
+            return value.strftime("%Y%m%d")
+        if width == 10:
+            return value.strftime("%Y-%m-%d")
         raise ValueError(f"Unsupported yymmdd width: {width}")

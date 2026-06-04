@@ -1,0 +1,64 @@
+{
+  "owner": "runtime",
+  "variants": [
+    {
+      "case_id": "runtime_set_dataset_not_found",
+      "program": "programs/missing_set_dataset.txt",
+      "inputs": {
+        "in": "inputs/shared_in.json"
+      },
+      "expected": "expected/missing_set_dataset.diagnostics.json"
+    },
+    {
+      "case_id": "runtime_dataset_option_invalid",
+      "program": "programs/dataset_option_invalid.txt",
+      "inputs": {
+        "in": "inputs/shared_in.json"
+      },
+      "expected": "expected/dataset_option_invalid.diagnostics.json"
+    },
+    {
+      "case_id": "runtime_operator_not_supported",
+      "program": "programs/operator_not_supported.txt",
+      "inputs": {
+        "in": "inputs/shared_in.json"
+      },
+      "expected": "expected/operator_not_supported.diagnostics.json"
+    },
+    {
+      "case_id": "runtime_function_argument_invalid_regex",
+      "program": "programs/invalid_regex.txt",
+      "inputs": {
+        "in": "inputs/regex_in.json"
+      },
+      "expected": "expected/invalid_regex.diagnostics.json"
+    },
+    {
+      "case_id": "runtime_merge_by_precondition_failed",
+      "program": "programs/merge_by_precondition_failed.txt",
+      "inputs": {
+        "a": "inputs/merge_by_precondition_failed.a.json",
+        "b": "inputs/merge_by_precondition_failed.b.json"
+      },
+      "expected": "expected/merge_by_precondition_failed.diagnostics.json"
+    },
+    {
+      "case_id": "runtime_merge_duplicate_column",
+      "program": "programs/merge_duplicate_column.txt",
+      "inputs": {
+        "a": "inputs/merge_duplicate_column.a.json",
+        "b": "inputs/merge_duplicate_column.b.json"
+      },
+      "expected": "expected/merge_duplicate_column.diagnostics.json"
+    },
+    {
+      "case_id": "runtime_first_last_var_name_collision",
+      "program": "programs/first_last_var_name_collision.txt",
+      "inputs": {
+        "a": "inputs/first_last_var_name_collision.a.json",
+        "b": "inputs/first_last_var_name_collision.b.json"
+      },
+      "expected": "expected/first_last_var_name_collision.diagnostics.json"
+    }
+  ]
+}

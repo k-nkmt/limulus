@@ -1,0 +1,7 @@
+{
+  "columns": ["id", "name", "code", "path"],
+  "rows": [
+    [1, " alice ", "x1", "root/usr/bin"],
+    [2, "bob", "x2", "root/opt/bin"]
+  ]
+}

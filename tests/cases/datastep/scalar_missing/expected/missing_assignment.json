@@ -1,0 +1,11 @@
+{
+  "datasets": {
+    "out": {
+      "columns": ["id", "a", "b", "c"],
+      "rows": [
+        [1, null, "", null],
+        [2, null, "", null]
+      ]
+    }
+  }
+}

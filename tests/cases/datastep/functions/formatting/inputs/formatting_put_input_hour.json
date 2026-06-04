@@ -1,0 +1,6 @@
+{
+  "columns": ["id", "amount", "best_text", "date_text", "timestamp_text", "clock_text"],
+  "rows": [
+    [7, 12345.6, "12345.6", "2024-02-03", "2024-02-03T16:24:43", "11:30"]
+  ]
+}

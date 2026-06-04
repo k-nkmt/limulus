@@ -1,11 +1,50 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping, MutableMapping, Sequence
 from typing import Any
 
-from ._naming import _dataset_key
+import pyarrow as pa
+
+from .naming import _dataset_key
 from .io_adapters import DataFrameAdapterPandas, DataInputAdapterArrow, DataOutputAdapterArrow, InputSpec, OutputSpec
 from .models import DataSetRef, Diagnostic, ExecuteResponse, OutputConversionResult
+
+
+_DICTIONARY_TABLES_SCHEMA = pa.schema(
+    [
+        pa.field("LIBNAME", pa.string()),
+        pa.field("MEMNAME", pa.string()),
+        pa.field("MEMTYPE", pa.string()),
+        pa.field("MEMLABEL", pa.string()),
+        pa.field("NOBS", pa.int64()),
+        pa.field("NVAR", pa.int64()),
+    ]
+)
+_DICTIONARY_COLUMNS_SCHEMA = pa.schema(
+    [
+        pa.field("LIBNAME", pa.string()),
+        pa.field("MEMNAME", pa.string()),
+        pa.field("MEMTYPE", pa.string()),
+        pa.field("NAME", pa.string()),
+        pa.field("TYPE", pa.string()),
+        pa.field("VARNUM", pa.int64()),
+        pa.field("LABEL", pa.string()),
+        pa.field("FORMAT", pa.string()),
+        pa.field("INFORMAT", pa.string()),
+    ]
+)
+
+
+def _empty_table(schema: pa.Schema) -> pa.Table:
+    arrays = [pa.array([], type=field.type) for field in schema]
+    return pa.Table.from_arrays(arrays, schema=schema)
+
+
+def _decode_metadata(metadata: Mapping[bytes, bytes] | None, key: bytes) -> str:
+    if metadata is None:
+        return ""
+    value = metadata.get(key, b"")
+    return value.decode("utf-8", errors="replace") if isinstance(value, bytes) else str(value)
 
 
 def _apply_arrow_metadata(table: Any, metadata: Mapping[str, Any]) -> Any:
@@ -172,10 +211,12 @@ class ExecutorIOService:
         explicit_inputs: Mapping[str, DataSetRef],
         available_inputs: Mapping[str, DataSetRef] | None,
         registered_tables: Mapping[str, DataSetRef],
+        synthetic_inputs: Mapping[str, DataSetRef] | None = None,
     ) -> tuple[dict[str, DataSetRef], list[Diagnostic]]:
         resolved_inputs = dict(explicit_inputs)
         diagnostics: list[Diagnostic] = []
         available = available_inputs or {}
+        synthetic = synthetic_inputs or {}
 
         source_statement = next(
             (
@@ -200,14 +241,19 @@ class ExecutorIOService:
                 resolved_inputs[input_name] = explicit_match
                 continue
 
+            generated = self.resolve_dataset_alias(available, input_name)
+            if generated is not None:
+                resolved_inputs[input_name] = generated
+                continue
+
             registered = self.resolve_dataset_alias(registered_tables, input_name)
             if registered is not None:
                 resolved_inputs[input_name] = registered
                 continue
 
-            generated = self.resolve_dataset_alias(available, input_name)
-            if generated is not None:
-                resolved_inputs[input_name] = generated
+            synthetic_match = self.resolve_dataset_alias(synthetic, input_name)
+            if synthetic_match is not None:
+                resolved_inputs[input_name] = synthetic_match
                 continue
 
             diagnostics.append(
@@ -220,6 +266,110 @@ class ExecutorIOService:
             return {}, diagnostics
 
         return resolved_inputs, diagnostics
+
+    def resolve_synthetic_inputs_for_names(
+        self,
+        *,
+        requested_names: Sequence[str],
+        explicit_inputs: Mapping[str, DataSetRef],
+        available_inputs: Mapping[str, DataSetRef] | None,
+        registered_tables: Mapping[str, DataSetRef],
+        cache: MutableMapping[tuple[str, tuple[tuple[str, int, int], ...]], DataSetRef] | None = None,
+    ) -> dict[str, DataSetRef]:
+        visible_inputs = dict(registered_tables)
+        visible_inputs.update(explicit_inputs)
+        if available_inputs:
+            visible_inputs.update(available_inputs)
+
+        resolved: dict[str, DataSetRef] = {}
+        for requested_name in requested_names:
+            normalized_name = self.dataset_name_key(requested_name)
+            if normalized_name not in {"DICTIONARY.TABLES", "DICTIONARY.COLUMNS"}:
+                continue
+            resolved[requested_name] = self._build_dictionary_input_ref(
+                requested_name=requested_name,
+                visible_inputs=visible_inputs,
+                cache=cache,
+            )
+        return resolved
+
+    def _build_dictionary_input_ref(
+        self,
+        *,
+        requested_name: str,
+        visible_inputs: Mapping[str, DataSetRef],
+        cache: MutableMapping[tuple[str, tuple[tuple[str, int, int], ...]], DataSetRef] | None,
+    ) -> DataSetRef:
+        normalized_name = self.dataset_name_key(requested_name)
+        cache_key = (normalized_name, self._visible_catalog_cache_key(visible_inputs))
+        if cache is not None and cache_key in cache:
+            return cache[cache_key]
+
+        if normalized_name == "DICTIONARY.TABLES":
+            payload = self._build_dictionary_tables(visible_inputs)
+        else:
+            payload = self._build_dictionary_columns(visible_inputs)
+
+        dataset_ref = DataSetRef(
+            kind="arrow_table",
+            location=f"dictionary://{normalized_name.lower()}",
+            payload=payload,
+        )
+        if cache is not None:
+            cache[cache_key] = dataset_ref
+        return dataset_ref
+
+    def _build_dictionary_tables(self, visible_inputs: Mapping[str, DataSetRef]) -> pa.Table:
+        rows: list[dict[str, Any]] = []
+        for name, dataset_ref in visible_inputs.items():
+            table, error = self.dataset_ref_to_arrow_table(name, dataset_ref)
+            if error is not None or table is None:
+                continue
+            rows.append(
+                {
+                    "LIBNAME": "WORK",
+                    "MEMNAME": self.dataset_name_key(name),
+                    "MEMTYPE": "DATA",
+                    "MEMLABEL": _decode_metadata(table.schema.metadata, b"memlabel"),
+                    "NOBS": table.num_rows,
+                    "NVAR": table.num_columns,
+                }
+            )
+        return pa.Table.from_pylist(rows, schema=_DICTIONARY_TABLES_SCHEMA) if rows else _empty_table(_DICTIONARY_TABLES_SCHEMA)
+
+    def _build_dictionary_columns(self, visible_inputs: Mapping[str, DataSetRef]) -> pa.Table:
+        rows: list[dict[str, Any]] = []
+        for name, dataset_ref in visible_inputs.items():
+            table, error = self.dataset_ref_to_arrow_table(name, dataset_ref)
+            if error is not None or table is None:
+                continue
+            for varnum, field in enumerate(table.schema, start=1):
+                rows.append(
+                    {
+                        "LIBNAME": "WORK",
+                        "MEMNAME": self.dataset_name_key(name),
+                        "MEMTYPE": "DATA",
+                        "NAME": field.name,
+                        "TYPE": str(field.type),
+                        "VARNUM": varnum,
+                        "LABEL": _decode_metadata(field.metadata, b"label"),
+                        "FORMAT": "",
+                        "INFORMAT": "",
+                    }
+                )
+        return pa.Table.from_pylist(rows, schema=_DICTIONARY_COLUMNS_SCHEMA) if rows else _empty_table(_DICTIONARY_COLUMNS_SCHEMA)
+
+    def _visible_catalog_cache_key(self, visible_inputs: Mapping[str, DataSetRef]) -> tuple[tuple[str, int, int], ...]:
+        return tuple(
+            sorted(
+                (
+                    self.dataset_name_key(name),
+                    id(dataset_ref),
+                    id(dataset_ref.payload),
+                )
+                for name, dataset_ref in visible_inputs.items()
+            )
+        )
 
     def load_input_rows(self, input_ref: DataSetRef) -> tuple[list[dict[str, Any]], Diagnostic | None]:
         normalized_kind = input_ref.kind.strip().lower()

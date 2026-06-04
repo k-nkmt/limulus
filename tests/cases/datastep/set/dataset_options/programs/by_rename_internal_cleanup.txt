@@ -1,0 +1,7 @@
+data out;
+  set in(in=in_flag) end=eof;
+  by grp;
+  if last.grp ;
+  keep grp amount;
+  rename amount = value;
+run;

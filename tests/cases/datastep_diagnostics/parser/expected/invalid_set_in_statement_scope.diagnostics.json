@@ -1,0 +1,23 @@
+{
+  "diagnostics": [
+    {
+      "stage": "parse",
+      "code": "PARSE_UNSUPPORTED_STATEMENT",
+      "severity": "error",
+      "location": "statement:2",
+      "message_fragments": [
+        "Unsupported statement syntax"
+      ],
+      "span": {
+        "line": 2,
+        "column": 14
+      },
+      "labels": [
+        {
+          "kind": "primary"
+        }
+      ],
+      "source_text": "data out;\n  set in_a in=in_left;\nrun;"
+    }
+  ]
+}

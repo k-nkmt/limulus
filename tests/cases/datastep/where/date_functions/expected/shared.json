@@ -1,0 +1,10 @@
+{
+  "datasets": {
+    "out": {
+      "columns": ["id", "month", "day", "year_num"],
+      "rows": [
+        [1, 2, 10, 2024]
+      ]
+    }
+  }
+}

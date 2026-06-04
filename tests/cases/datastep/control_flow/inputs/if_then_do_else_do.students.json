@@ -1,0 +1,9 @@
+{
+  "columns": ["name", "age"],
+  "rows": [
+    ["Adam", 14],
+    ["Alice", 12],
+    ["Bob", 14],
+    ["Catherine", 13]
+  ]
+}

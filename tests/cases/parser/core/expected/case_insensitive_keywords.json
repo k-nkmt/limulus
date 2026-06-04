@@ -1,0 +1,24 @@
+{
+  "statements": [
+    {
+      "kind": "DATA"
+    },
+    {
+      "kind": "SET",
+      "dataset_refs": [
+        {
+          "name": "Work.Input"
+        }
+      ]
+    },
+    {
+      "kind": "WHERE"
+    },
+    {
+      "kind": "OUTPUT"
+    },
+    {
+      "kind": "RUN"
+    }
+  ]
+}

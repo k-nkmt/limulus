@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.abspath(".."))
 project = "limulus"
 copyright = "2026, k-nkmt"
 author = "k-nkmt"
-release = "0.2.0"
+release = "0.5.0"
 
 extensions = [
     "myst_nb",
@@ -54,7 +54,6 @@ intersphinx_mapping = {
 }
 
 autodoc_default_options = {
-    "members": True,
     "undoc-members": False,
     "show-inheritance": True,
 }

@@ -1,0 +1,10 @@
+{
+  "datasets": {
+    "out": {
+      "columns": ["joined", "rowno"],
+      "rows": [
+        ["x1", 1]
+      ]
+    }
+  }
+}

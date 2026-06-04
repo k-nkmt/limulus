@@ -1,0 +1,4 @@
+data work.out;
+set in;
+output WORK.OUT;
+run;

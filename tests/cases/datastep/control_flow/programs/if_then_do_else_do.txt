@@ -1,0 +1,10 @@
+data age1 age2;
+  set students end=eof;
+  seq = _n_;
+  if age > 13 then do;
+    output age1;
+  end;
+  else do;
+    output age2;
+  end;
+run;

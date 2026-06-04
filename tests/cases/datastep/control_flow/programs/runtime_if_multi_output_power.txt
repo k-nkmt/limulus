@@ -1,0 +1,8 @@
+data older younger;
+  set in;
+  height_m = height * 0.0254;
+  weight_kg = weight * 0.454;
+  bmi = round(weight_kg / (height_m**2), 0.1);
+  if age > 13 then output older;
+  else output younger;
+run;

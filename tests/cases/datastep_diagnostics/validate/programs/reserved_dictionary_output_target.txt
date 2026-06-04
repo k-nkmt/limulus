@@ -1,0 +1,3 @@
+data dictionary.tables;
+set in;
+run;

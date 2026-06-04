@@ -1,0 +1,11 @@
+{
+  "datasets": {
+    "out": {
+      "columns": ["seq_l", "seq_u", "err_l", "err_u"],
+      "rows": [
+        [1, 1, 0, 0],
+        [2, 2, 0, 0]
+      ]
+    }
+  }
+}

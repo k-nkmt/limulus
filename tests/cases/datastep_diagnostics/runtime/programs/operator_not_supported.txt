@@ -1,0 +1,4 @@
+data out;
+  set in;
+  if id === 1 then output out;
+run;

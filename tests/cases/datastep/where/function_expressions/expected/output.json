@@ -1,0 +1,10 @@
+{
+  "datasets": {
+    "out": {
+      "columns": ["name"],
+      "rows": [
+        ["ALICE"]
+      ]
+    }
+  }
+}

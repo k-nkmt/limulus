@@ -1,0 +1,5 @@
+data out;
+set in_a(in=in_left) in_b(in=in_right) indsname=src end=last;
+merge left(keep=id amount drop=tmp where=(amount > 0) rename=(amount=amt)) right(in=in_right keep=id) end=eof;
+by id;
+run;

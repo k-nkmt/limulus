@@ -1,0 +1,10 @@
+{
+  "datasets": {
+    "out": {
+      "columns": ["a", "b", "c", "arr_size", "name2", "c1", "c2"],
+      "rows": [
+        [10, 20, 30, 3, "b", "x", "y"]
+      ]
+    }
+  }
+}

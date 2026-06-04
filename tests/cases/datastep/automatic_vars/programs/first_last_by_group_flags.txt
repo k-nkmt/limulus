@@ -1,0 +1,7 @@
+data out;
+  set in;
+  by grp;
+  first_flag = first.grp;
+  last_flag = last.grp;
+  keep grp id first_flag last_flag;
+run;

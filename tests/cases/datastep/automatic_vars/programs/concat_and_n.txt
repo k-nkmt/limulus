@@ -1,0 +1,7 @@
+data out;
+  set in;
+  joined = cats(prefix, id, suffix);
+  rowno = _n_;
+  if joined = 'x1' and rowno = 1 then output ;
+  keep joined rowno;
+run;

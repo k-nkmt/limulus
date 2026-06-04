@@ -1,0 +1,37 @@
+{
+  "owner": "parser",
+  "variants": [
+    {
+      "case_id": "parser_invalid_syntax",
+      "program": "programs/invalid_syntax.txt",
+      "inputs": {
+        "in": "inputs/shared_in.json"
+      },
+      "expected": "expected/invalid_syntax.diagnostics.json"
+    },
+    {
+      "case_id": "parser_invalid_set_in_statement_scope",
+      "program": "programs/invalid_set_in_statement_scope.txt",
+      "inputs": {
+        "in": "inputs/shared_in.json"
+      },
+      "expected": "expected/invalid_set_in_statement_scope.diagnostics.json"
+    },
+    {
+      "case_id": "parser_invalid_set_indsname_dataset_scope",
+      "program": "programs/invalid_set_indsname_dataset_scope.txt",
+      "inputs": {
+        "in": "inputs/shared_in.json"
+      },
+      "expected": "expected/invalid_set_indsname_dataset_scope.diagnostics.json"
+    },
+    {
+      "case_id": "parser_invalid_merge_indsname_statement_scope",
+      "program": "programs/invalid_merge_indsname_statement_scope.txt",
+      "inputs": {
+        "in": "inputs/shared_in.json"
+      },
+      "expected": "expected/invalid_merge_indsname_statement_scope.diagnostics.json"
+    }
+  ]
+}

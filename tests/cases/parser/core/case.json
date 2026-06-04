@@ -1,0 +1,55 @@
+{
+  "owner": "parser",
+  "variants": [
+    {
+      "case_id": "parser_phase1_normalized_ast",
+      "program": "programs/phase1_normalized_ast.txt",
+      "expected": "expected/phase1_normalized_ast.json"
+    },
+    {
+      "case_id": "parser_set_and_merge_options",
+      "program": "programs/set_and_merge_options.txt",
+      "expected": "expected/set_and_merge_options.json"
+    },
+    {
+      "case_id": "parser_set_multiple_inputs_and_projection_options",
+      "program": "programs/set_multiple_inputs_and_projection_options.txt",
+      "expected": "expected/set_multiple_inputs_and_projection_options.json"
+    },
+    {
+      "case_id": "parser_output_label_and_rename",
+      "program": "programs/output_label_and_rename.txt",
+      "expected": "expected/output_label_and_rename.json"
+    },
+    {
+      "case_id": "parser_case_insensitive_keywords",
+      "program": "programs/case_insensitive_keywords.txt",
+      "expected": "expected/case_insensitive_keywords.json"
+    },
+    {
+      "case_id": "parser_comments_ignored",
+      "program": "programs/comments_ignored.txt",
+      "expected": "expected/comments_ignored.json"
+    },
+    {
+      "case_id": "parser_set_option_equals_whitespace",
+      "program": "programs/set_option_equals_whitespace.txt",
+      "expected": "expected/set_option_equals_whitespace.json"
+    },
+    {
+      "case_id": "parser_skipped_call_and_stop",
+      "program": "programs/skipped_call_and_stop.txt",
+      "expected": "expected/skipped_call_and_stop.json"
+    },
+    {
+      "case_id": "parser_if_structured_keyword_ops",
+      "program": "programs/if_structured_keyword_ops.txt",
+      "expected": "expected/if_structured_keyword_ops.json"
+    },
+    {
+      "case_id": "parser_do_array_structured_specs",
+      "program": "programs/do_array_structured_specs.txt",
+      "expected": "expected/do_array_structured_specs.json"
+    }
+  ]
+}

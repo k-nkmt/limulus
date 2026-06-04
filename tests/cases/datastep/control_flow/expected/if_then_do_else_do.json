@@ -1,0 +1,18 @@
+{
+  "datasets": {
+    "age1": {
+      "columns": ["name", "age", "seq"],
+      "rows": [
+        ["Adam", 14, 1],
+        ["Bob", 14, 3]
+      ]
+    },
+    "age2": {
+      "columns": ["name", "age", "seq"],
+      "rows": [
+        ["Alice", 12, 2],
+        ["Catherine", 13, 4]
+      ]
+    }
+  }
+}

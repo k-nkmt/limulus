@@ -2,7 +2,7 @@
 
 A reference for the Data Step statements supported by limulus.  
 For differences from SAS language, see [Differences from SAS language](differences.md).
-For Column-Oriented API and Ssession-level helpers such as `sort`, `sql` and `include`,  see [API Reference](api.md) and [Changelog](changelog.md).
+For column-oriented API and session-level helpers such as `sort`, `sql`, and `include`, see [API Reference](api.md) and [Changelog](changelog.md).
 
 ---
 
@@ -273,6 +273,39 @@ Does not output the current row (moves to the next iteration of the PDV loop).
 | `year(d)` | Year from date | `year(mdy(1, 15, 2025))` |
 | `intck(unit, from, to)` | Date difference | `intck('day', mdy(1,1,2025), mdy(1,10,2025))` |
 
+### Format Helpers
+
+| Function | Description | Example |
+|------|------|--------|
+| `put(value, format_name)` | Render a value as text with a built-in or registered format | `put(amount, 8.2.)` |
+| `input(value, informat_name)` | Parse text into a numeric, date, datetime, or time value | `input(date_text, yymmdd10.)` |
+| `hour(value)` | Convert a time-like value to decimal hours | `hour(clock_text)` |
+
+Built-in `put(...)` formats currently support:
+
+- numeric to text: `best.`, `w.`, `w.d`, `w.d.`, `zw.`, `zw.d`, `zw.d.`, `commaw.`, `commaw.d`, `commaw.d.`
+- date / datetime / time to text: `e8601da.`, `e8601dt.`, `yymmdd6.`, `yymmdd8.`, `yymmdd10.`, `time.`
+
+Built-in `input(...)` informats currently support:
+
+- text to numeric: `best.`
+- text to date / datetime / time: `e8601da.`, `e8601dt.`, `yymmdd6.`, `yymmdd8.`, `yymmdd10.`, `time.`
+
+Session-level custom catalogs can also be registered for exact-match lookups:
+
+- `Session.register_format(name, mapping)` registers a numeric `put(...)` catalog.
+- `Session.register_format(name, mapping, namespace="character")` registers a character `put(...)` catalog referenced as `$name.`.
+- `Session.register_informat(name, mapping)` registers a float64-only `input(...)` catalog.
+
+Current dict-catalog semantics are intentionally narrow:
+
+- `put(value, myfmt.)` returns text and falls back to the original value when no dict entry matches.
+- `put(value, $myfmt.)` uses the same base name with the character-format namespace.
+- `input(value, myinf.)` returns `null` when no dict entry matches.
+- dict custom `input(...)` is float64-only in this phase; typed custom informats remain deferred.
+- callable registrations remain available, but they are separate low-level hooks rather than the serializable dict-catalog path.
+
+
 ### Regular Expressions
 
 | Function | Description | Example |
@@ -292,8 +325,8 @@ Does not output the current row (moves to the next iteration of the PDV loop).
 
 | Function | Description | Example |
 |------|------|--------|
-| `lead(x, n)` | Next row's value | `lead(amount)` |
-| `shift(x, n)` | negative n behaves like `lag`, positive n like `lead` | `shift(amount, -1)`<br>`shift(amount, 1)` |
-| `apply` | Apply a function.  | `apply('double',amount)`<br>`apply(lambda x: x*2,amount)`<br>`apply('math.sqrt',value)` |
+| `lead(x, n)` | Next row's value | `lead(x)` |
+| `shift(x, n)` | negative n behaves like `lag`, positive n like `lead` | `shift(x, -1)`<br>`shift(x, 1)` |
+| `apply` | Apply a Python callable by name. | `apply('double',amount)`<br>`apply('len',note)`<br>`apply('math.sqrt',value)` |
 
-> **Note:** `apply()` is not supported by the Rust backend. When `backend="auto"` (the default), execution automatically falls back to the Python backend whenever `apply()` appears in the code. To suppress the fallback and always use the Python backend, set `backend="python"` on the `Session`.
+> **Note:** `apply()` keeps the Rust row loop when the target can be resolved from a string name at execution setup time. Builtins such as `len`, dotted module functions such as `math.sqrt`, and in-scope Python helpers such as `double` are supported. Dynamic callable references that cannot be pre-resolved are not part of the Rust-first contract.

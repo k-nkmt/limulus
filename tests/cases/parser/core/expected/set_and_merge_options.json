@@ -1,0 +1,67 @@
+{
+  "statements": [
+    {
+      "kind": "DATA"
+    },
+    {
+      "kind": "SET",
+      "dataset_refs": [
+        {
+          "name": "in_a",
+          "options": {
+            "in_var": "in_left"
+          }
+        },
+        {
+          "name": "in_b",
+          "options": {
+            "in_var": "in_right"
+          }
+        }
+      ],
+      "statement_options": {
+        "indsname_var": "src",
+        "end_var": "last"
+      }
+    },
+    {
+      "kind": "MERGE",
+      "dataset_refs": [
+        {
+          "name": "left",
+          "options": {
+            "keep_vars": [
+              "id",
+              "amount"
+            ],
+            "drop_vars": [
+              "tmp"
+            ],
+            "where_expr": "amount > 0",
+            "rename_map": {
+              "amount": "amt"
+            }
+          }
+        },
+        {
+          "name": "right",
+          "options": {
+            "in_var": "in_right",
+            "keep_vars": [
+              "id"
+            ]
+          }
+        }
+      ],
+      "statement_options": {
+        "end_var": "eof"
+      }
+    },
+    {
+      "kind": "BY"
+    },
+    {
+      "kind": "RUN"
+    }
+  ]
+}

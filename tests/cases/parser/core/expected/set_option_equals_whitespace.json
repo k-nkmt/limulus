@@ -1,0 +1,86 @@
+{
+  "statements": [
+    {
+      "kind": "DATA"
+    },
+    {
+      "kind": "SET",
+      "statement_options": {
+        "end_var": "eof"
+      }
+    },
+    {
+      "kind": "SET",
+      "statement_options": {
+        "end_var": "eof"
+      }
+    },
+    {
+      "kind": "SET",
+      "statement_options": {
+        "end_var": "eof"
+      }
+    },
+    {
+      "kind": "SET",
+      "statement_options": {
+        "end_var": "eof"
+      }
+    },
+    {
+      "kind": "SET",
+      "statement_options": {
+        "indsname_var": "src"
+      }
+    },
+    {
+      "kind": "SET",
+      "statement_options": {
+        "indsname_var": "src"
+      }
+    },
+    {
+      "kind": "SET",
+      "dataset_refs": [
+        {
+          "options": {
+            "in_var": "flag1"
+          }
+        }
+      ]
+    },
+    {
+      "kind": "SET",
+      "dataset_refs": [
+        {
+          "options": {
+            "in_var": "flag2"
+          }
+        }
+      ]
+    },
+    {
+      "kind": "SET",
+      "dataset_refs": [
+        {
+          "options": {
+            "in_var": "flag3"
+          }
+        }
+      ]
+    },
+    {
+      "kind": "SET",
+      "dataset_refs": [
+        {
+          "options": {
+            "in_var": "flag4"
+          }
+        }
+      ]
+    },
+    {
+      "kind": "RUN"
+    }
+  ]
+}

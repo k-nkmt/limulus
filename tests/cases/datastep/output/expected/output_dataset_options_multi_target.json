@@ -1,0 +1,16 @@
+{
+  "datasets": {
+    "a": {
+      "columns": ["id"],
+      "rows": [
+        [1]
+      ]
+    },
+    "b": {
+      "columns": ["id", "full_name"],
+      "rows": [
+        [2, "Bob"]
+      ]
+    }
+  }
+}

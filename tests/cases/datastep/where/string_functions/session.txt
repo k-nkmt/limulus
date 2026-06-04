@@ -1,0 +1,4 @@
+data out;
+  set in;
+  where substr(name, 1, 1) = 'A' and cats(code, suffix) = 'X1';
+run;

@@ -1,0 +1,10 @@
+{
+  "datasets": {
+    "out": {
+      "columns": ["dim_vars", "x"],
+      "rows": [
+        [3, 20]
+      ]
+    }
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "datasets": {
+    "dm": {
+      "memlabel": "DM",
+      "columns": ["id", "amount"],
+      "rows": [
+        [1, 10]
+      ]
+    }
+  }
+}

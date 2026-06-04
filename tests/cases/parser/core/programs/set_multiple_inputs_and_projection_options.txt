@@ -1,0 +1,6 @@
+data out;
+set a b c;
+set in(keep=id amount drop=tmp where=(amount > 0) rename=(amount=amt) firstobs=2 obs=3);
+if amount > 0 then output out;
+delete;
+run;

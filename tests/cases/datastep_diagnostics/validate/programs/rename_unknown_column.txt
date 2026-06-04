@@ -1,0 +1,4 @@
+data out;
+set in;
+rename missing=amt;
+run;

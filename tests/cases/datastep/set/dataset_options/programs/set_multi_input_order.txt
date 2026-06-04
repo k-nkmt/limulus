@@ -1,0 +1,3 @@
+data out;
+  set a b c;
+run;

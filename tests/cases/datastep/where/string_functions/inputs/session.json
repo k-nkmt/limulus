@@ -1,0 +1,7 @@
+{
+  "columns": ["id", "name", "code", "suffix"],
+  "rows": [
+    [1, "Alice", "X", "1"],
+    [2, "Bob", "Y", "2"]
+  ]
+}

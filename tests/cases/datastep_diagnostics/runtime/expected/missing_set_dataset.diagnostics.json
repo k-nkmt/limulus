@@ -1,0 +1,22 @@
+{
+  "diagnostics": [
+    {
+      "stage": "validate",
+      "code": "RUNTIME_SET_DATASET_NOT_FOUND",
+      "severity": "error",
+      "message_fragments": [
+        "Input dataset is not provided",
+        "missing_ds"
+      ],
+      "span": {
+        "line": 2,
+        "column": 3
+      },
+      "labels": [
+        {
+          "kind": "primary"
+        }
+      ]
+    }
+  ]
+}

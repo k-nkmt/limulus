@@ -1,0 +1,4 @@
+data out;
+  set inp;
+  where length(name) > 5;
+run;

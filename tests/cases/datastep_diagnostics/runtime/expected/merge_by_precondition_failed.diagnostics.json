@@ -1,0 +1,22 @@
+{
+  "diagnostics": [
+    {
+      "stage": "validate",
+      "code": "RUNTIME_BY_PRECONDITION_FAILED",
+      "severity": "error",
+      "message_fragments": [
+        "missing in source rows",
+        "id"
+      ],
+      "span": {
+        "line": 3,
+        "column": 3
+      },
+      "labels": [
+        {
+          "kind": "primary"
+        }
+      ]
+    }
+  ]
+}

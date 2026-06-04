@@ -1,0 +1,57 @@
+{
+  "statements": [
+    {
+      "kind": "DATA"
+    },
+    {
+      "kind": "SET",
+      "dataset_refs": [
+        {
+          "name": "a"
+        },
+        {
+          "name": "b"
+        },
+        {
+          "name": "c"
+        }
+      ]
+    },
+    {
+      "kind": "SET",
+      "dataset_refs": [
+        {
+          "name": "in",
+          "options": {
+            "keep_vars": [
+              "id",
+              "amount"
+            ],
+            "drop_vars": [
+              "tmp"
+            ],
+            "where_expr": "amount > 0",
+            "rename_map": {
+              "amount": "amt"
+            },
+            "firstobs": 2,
+            "obs": 3
+          }
+        }
+      ]
+    },
+    {
+      "kind": "IF",
+      "if_spec": {
+        "condition": "amount > 0",
+        "then_action": "output out"
+      }
+    },
+    {
+      "kind": "DELETE"
+    },
+    {
+      "kind": "RUN"
+    }
+  ]
+}
