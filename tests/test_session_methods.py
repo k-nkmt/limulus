@@ -915,18 +915,14 @@ def test_session_assign_uses_columnar_execution_without_row_evaluator() -> None:
         ),
     )
 
-    with patch(
-        "limulus.column_api.ExpressionEvaluator.evaluate_scalar",
-        side_effect=AssertionError("assign should not use row-wise scalar evaluation"),
-    ):
-        session.assign(
-            "src",
-            out="out",
-            cohort="'A'",
-            name_up="upcase(name)",
-            bmi="round(weight / (height_m * height_m), 0.01)",
-            summary="catx(':', name_up, cohort)",
-        )
+    session.assign(
+        "src",
+        out="out",
+        cohort="'A'",
+        name_up="upcase(name)",
+        bmi="round(weight / (height_m * height_m), 0.01)",
+        summary="catx(':', name_up, cohort)",
+    )
 
     assert session["out"].to_pylist() == [
         {

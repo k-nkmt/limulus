@@ -30,7 +30,12 @@
             "drop_vars": [
               "tmp"
             ],
-            "where_expr": "amount > 0",
+            "where_expr": {
+              "kind": "comparison",
+              "column": "amount",
+              "operator": ">",
+              "value": 0
+            },
             "rename_map": {
               "amount": "amt"
             },

@@ -30,7 +30,6 @@ class DiagnosticExpectation:
 class DataStepDiagnosticCase:
     case_id: str
     owner: str
-    backend: str
     extended: bool
     case_dir: Path
     program_text: str
@@ -78,16 +77,17 @@ def _resolve_relative_file(case_dir: Path, relative_path: str, *, case_id: str, 
     return candidate
 
 
-def _validate_backend(backend: Any, *, case_id: str) -> str:
-    if backend not in {"python", "rust", "auto"}:
-        raise DataStepDiagnosticCaseLoaderError(f"case={case_id}: backend must be one of python/rust/auto")
-    return backend
-
-
 def _validate_extended(extended: Any, *, case_id: str) -> bool:
     if not isinstance(extended, bool):
         raise DataStepDiagnosticCaseLoaderError(f"case={case_id}: extended must be a boolean")
     return extended
+
+
+def _reject_backend_field(payload: dict[str, Any], *, case_id: str) -> None:
+    if "backend" in payload:
+        raise DataStepDiagnosticCaseLoaderError(
+            f"case={case_id}: backend matrix is removed; diagnostics execute with the Rust row contract"
+        )
 
 
 def _validate_output_targets(output_targets: Any, *, case_id: str) -> tuple[str, ...] | None:
@@ -172,6 +172,7 @@ def _load_expected_diagnostics(path: Path, *, case_id: str) -> tuple[DiagnosticE
 def _load_case(case_json_path: Path) -> list[DataStepDiagnosticCase]:
     case_dir = case_json_path.parent
     manifest = _read_json(case_json_path, case_id=case_dir.name, label="case manifest")
+    _reject_backend_field(manifest, case_id=case_dir.name)
     required = {"owner", "variants"}
     missing = sorted(required - set(manifest.keys()))
     if missing:
@@ -191,6 +192,7 @@ def _load_case(case_json_path: Path) -> list[DataStepDiagnosticCase]:
     for variant in variants:
         if not isinstance(variant, dict):
             raise DataStepDiagnosticCaseLoaderError(f"case={case_dir.name}: variants must contain objects")
+        _reject_backend_field(variant, case_id=case_dir.name)
 
         case_id = variant.get("case_id")
         if not isinstance(case_id, str) or not case_id:
@@ -229,7 +231,6 @@ def _load_case(case_json_path: Path) -> list[DataStepDiagnosticCase]:
             DataStepDiagnosticCase(
                 case_id=case_id,
                 owner=owner,
-                backend=_validate_backend(variant.get("backend", "rust"), case_id=case_id),
                 extended=_validate_extended(variant.get("extended", False), case_id=case_id),
                 case_dir=case_dir,
                 program_text=program_path.read_text(encoding="utf-8"),

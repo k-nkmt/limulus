@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from typing import Any
 
 
@@ -16,51 +16,44 @@ _CHARACTER_NAMESPACE = "character"
 
 class FormatRegistry:
     def __init__(self) -> None:
-        self._formatters: dict[tuple[str, str], Callable[[Any], Any]] = {}
         self._format_catalogs: dict[tuple[str, str], dict[Any, str | None]] = {}
-        self._informats: dict[str, Callable[[Any], Any]] = {}
         self._informat_catalogs: dict[str, dict[Any, float | None]] = {}
-        self._informat_kinds: dict[str, str] = {}
 
     def register_format(
         self,
         name: str,
-        formatter: Callable[[Any], Any] | Mapping[Any, Any],
+        formatter: Mapping[Any, Any],
         *,
         namespace: str | None = None,
     ) -> None:
         normalized_name, normalized_namespace = self._normalize_format_spec(name, namespace=namespace)
         catalog_key = (normalized_namespace, normalized_name)
         if callable(formatter):
-            self._formatters[catalog_key] = formatter
-            return
+            raise ValueError(
+                "Callable format registration is not supported; register a mapping catalog instead"
+            )
         if not isinstance(formatter, Mapping):
-            raise TypeError("register_format() expects a callable formatter or mapping catalog")
+            raise TypeError("register_format() expects a mapping catalog")
         self._format_catalogs[catalog_key] = {
             key: self._coerce_put_output(value)
             for key, value in formatter.items()
         }
 
-    def register_informat(self, name: str, parser: Callable[[Any], Any] | Mapping[Any, Any], *, kind: str | None = None) -> None:
+    def register_informat(self, name: str, parser: Mapping[Any, Any], *, kind: str | None = None) -> None:
         normalized = self.normalize_name(name)
         if callable(parser):
-            self._informats[normalized] = parser
-            if kind is not None:
-                self._informat_kinds[normalized] = kind.strip().lower()
-            return
+            raise ValueError(
+                "Callable informat registration is not supported; register a mapping catalog instead"
+            )
         if not isinstance(parser, Mapping):
-            raise TypeError("register_informat() expects a callable parser or mapping catalog")
+            raise TypeError("register_informat() expects a mapping catalog")
         self._informat_catalogs[normalized] = {
             key: self._coerce_informat_output(value)
             for key, value in parser.items()
         }
-        self._informat_kinds[normalized] = "float64"
 
     def has_custom_registrations(self) -> bool:
-        return bool(self._formatters or self._format_catalogs or self._informats or self._informat_catalogs)
-
-    def has_callable_registrations(self) -> bool:
-        return bool(self._formatters or self._informats)
+        return bool(self._format_catalogs or self._informat_catalogs)
 
     def has_dict_catalogs(self) -> bool:
         return bool(self._format_catalogs or self._informat_catalogs)
@@ -68,7 +61,6 @@ class FormatRegistry:
     def dispatch_hints(self) -> dict[str, bool]:
         return {
             "has_custom_format_registry": self.has_custom_registrations(),
-            "has_callable_format_registry": self.has_callable_registrations(),
             "has_dict_format_catalogs": self.has_dict_catalogs(),
         }
 
@@ -106,10 +98,6 @@ class FormatRegistry:
 
         raw_text = self._coerce_name_text(format_name)
         normalized, namespace = self._normalize_format_spec(raw_text)
-        formatter = self._formatters.get((namespace, normalized))
-        if formatter is not None:
-            return formatter(value)
-
         catalog = self._format_catalogs.get((namespace, normalized))
         if catalog is not None:
             matched = catalog.get(value)
@@ -170,10 +158,6 @@ class FormatRegistry:
             return None
 
         normalized = self.normalize_name(informat_name)
-        parser = self._informats.get(normalized)
-        if parser is not None:
-            return parser(value)
-
         catalog = self._informat_catalogs.get(normalized)
         if catalog is not None:
             return catalog.get(value)
@@ -209,9 +193,6 @@ class FormatRegistry:
         normalized = self.normalize_name(informat_name)
         if normalized in self._informat_catalogs:
             return "float64"
-        registered_kind = self._informat_kinds.get(normalized)
-        if registered_kind is not None:
-            return registered_kind
         if normalized in {"e8601da", "yymmdd6", "yymmdd8", "yymmdd10"}:
             return "date"
         if normalized == "e8601dt":

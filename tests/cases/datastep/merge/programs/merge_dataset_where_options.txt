@@ -1,0 +1,13 @@
+data out;
+  merge left(
+    keep=id lx
+    where=(id >= 2)
+    rename=(lx=left_value)
+  ) right(
+    keep=id rx
+    where=(id >= 2)
+    rename=(rx=right_value)
+  );
+  by id;
+  output out;
+run;

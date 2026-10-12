@@ -2,6 +2,15 @@
   "category": "merge",
   "variants": [
     {
+      "case_id": "merge_dataset_where_options",
+      "program": "programs/merge_dataset_where_options.txt",
+      "inputs": {
+        "left": "inputs/merge_dataset_where_options.left.json",
+        "right": "inputs/merge_dataset_where_options.right.json"
+      },
+      "expected": "expected/merge_dataset_where_options.json"
+    },
+    {
       "case_id": "merge_option_chain",
       "program": "programs/merge_option_chain.txt",
       "inputs": {

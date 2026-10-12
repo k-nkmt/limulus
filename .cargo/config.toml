@@ -1,0 +1,5 @@
+[env]
+PYO3_PYTHON = { value = ".venv/bin/python", relative = true }
+
+[target.aarch64-apple-darwin]
+runner = ".cargo/run-with-python-env.sh"

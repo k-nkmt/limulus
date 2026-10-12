@@ -7,7 +7,7 @@ array_size: BRACKET_WILDCARD -> wildcard_size
 character_array: DOLLAR
 variable_list: NAME+
 
-ARRAY.5: /[aA][rR][rR][aA][yY]/
+ARRAY.5: /(?ai:array)/
 NAME: /[A-Za-z_][\w\.]*/
 BRACKET_WILDCARD: /\[\s*\*\s*\]/
 BRACKET_NUMBER: /\[\s*\d+\s*\]/

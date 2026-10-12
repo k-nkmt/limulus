@@ -7,10 +7,7 @@
       "inputs": {
         "in": "inputs/if_do_sum_retain.in.json"
       },
-      "expected": "expected/if_do_sum_retain.json",
-      "compatibility_notes": [
-        "python runtime does not currently retain intermediate sum variable for this pattern"
-      ]
+      "expected": "expected/if_do_sum_retain.json"
     },
     {
       "case_id": "sum_statement_accumulation",

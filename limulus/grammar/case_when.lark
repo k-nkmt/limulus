@@ -17,11 +17,11 @@ expression: expression_atom+
                 | LBRACK expression? RBRACK
                 | LBRACE expression? RBRACE
 
-CASE.5: /[cC][aA][sS][eE]/
-WHEN.5: /[wW][hH][eE][nN]/
-THEN.5: /[tT][hH][eE][nN]/
-ELSE.5: /[eE][lL][sS][eE]/
-END.5: /[eE][nN][dD]/
+CASE.5: /(?ai:case)/
+WHEN.5: /(?ai:when)/
+THEN.5: /(?ai:then)/
+ELSE.5: /(?ai:else)/
+END.5: /(?ai:end)/
 NAME.1: /[A-Za-z_][\w\.]*/
 NUMBER: /(?:\d+\.\d*|\d+|\.\d+)(?:[eE][+-]?\d+)?/
 STRING: /'(?:''|[^'])*'|"(?:""|[^"])*"/

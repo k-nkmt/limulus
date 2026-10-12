@@ -30,10 +30,10 @@ action: action_part+
             | LBRACK action? RBRACK
             | LBRACE action? RBRACE
 
-IF.5: /[iI][fF]/
-THEN.5: /[tT][hH][eE][nN]/
-COMPARE_WORD.4: /\b(?:[eE][qQ]|[nN][eE]|[gG][tT]|[lL][tT]|[gG][eE]|[lL][eE])\b/
-BOOL_WORD.4: /\b(?:[aA][nN][dD]|[oO][rR]|[nN][oO][tT])\b/
+IF.5: /(?ai:if)/
+THEN.5: /(?ai:then)/
+COMPARE_WORD.4: /\b(?ai:eq|ne|gt|lt|ge|le)\b/
+BOOL_WORD.4: /\b(?ai:and|or|not)\b/
 NAME.1: /[A-Za-z_][\w\.]*/
 NUMBER: /(?:\d+\.\d*|\d+|\.\d+)(?:[eE][+-]?\d+)?/
 STRING: /'(?:''|[^'])*'|"(?:""|[^"])*"/

@@ -23,7 +23,6 @@ class ExpectedDataset:
 class DataStepCase:
     case_id: str
     category: str
-    backend: str
     extended: bool
     compatibility_notes: tuple[str, ...]
     case_dir: Path
@@ -77,16 +76,17 @@ def _validate_category(category: Any, *, case_id: str) -> str:
     return category
 
 
-def _validate_backend(backend: Any, *, case_id: str) -> str:
-    if backend not in {"python", "rust", "auto"}:
-        raise DataStepCaseLoaderError(f"case={case_id}: backend must be one of python/rust/auto")
-    return backend
-
-
 def _validate_extended(extended: Any, *, case_id: str) -> bool:
     if not isinstance(extended, bool):
         raise DataStepCaseLoaderError(f"case={case_id}: extended must be a boolean")
     return extended
+
+
+def _reject_backend_field(payload: dict[str, Any], *, case_id: str) -> None:
+    if "backend" in payload:
+        raise DataStepCaseLoaderError(
+            f"case={case_id}: backend matrix is removed; Data Step cases execute with the Rust row contract"
+        )
 
 
 def _validate_input_refs(inputs: Any, *, case_id: str) -> dict[str, str]:
@@ -231,7 +231,6 @@ def _build_case(
     case_dir: Path,
     category: str,
     case_id: str,
-    backend: str,
     extended: bool,
     program_ref: str,
     input_refs: dict[str, str],
@@ -266,7 +265,6 @@ def _build_case(
     return DataStepCase(
         case_id=case_id,
         category=category,
-        backend=backend,
         extended=extended,
         compatibility_notes=compatibility_notes,
         case_dir=case_dir,
@@ -279,6 +277,7 @@ def _build_case(
 def _load_case(case_json_path: Path) -> list[DataStepCase]:
     case_dir = case_json_path.parent
     manifest = _read_json(case_json_path, case_id=case_dir.name, label="case manifest")
+    _reject_backend_field(manifest, case_id=case_dir.name)
     if "variants" in manifest:
         shared_required = {"category", "variants"}
         missing = sorted(shared_required - set(manifest.keys()))
@@ -297,6 +296,7 @@ def _load_case(case_json_path: Path) -> list[DataStepCase]:
         for variant in variants:
             if not isinstance(variant, dict):
                 raise DataStepCaseLoaderError(f"case={shared_case_id}: variants must contain objects")
+            _reject_backend_field(variant, case_id=shared_case_id)
             case_id = _validate_case_id(variant.get("case_id"), context=f"case={shared_case_id}")
             if case_id in seen_case_ids:
                 raise DataStepCaseLoaderError(f"case={shared_case_id}: duplicate variant case_id: {case_id}")
@@ -306,7 +306,6 @@ def _load_case(case_json_path: Path) -> list[DataStepCase]:
                     case_dir=case_dir,
                     category=category,
                     case_id=case_id,
-                    backend=_validate_backend(variant.get("backend", manifest.get("backend", "rust")), case_id=case_id),
                     extended=_validate_extended(variant.get("extended", manifest.get("extended", False)), case_id=case_id),
                     program_ref=_validate_program_ref(variant.get("program", "program.txt"), case_id=case_id),
                     input_refs=_validate_input_refs(variant.get("inputs"), case_id=case_id),
@@ -335,7 +334,6 @@ def _load_case(case_json_path: Path) -> list[DataStepCase]:
             case_dir=case_dir,
             category=_validate_category(manifest["category"], case_id=case_id),
             case_id=case_id,
-            backend=_validate_backend(manifest.get("backend", "rust"), case_id=case_id),
             extended=_validate_extended(manifest.get("extended", False), case_id=case_id),
             program_ref="program.txt",
             input_refs=_validate_input_refs(manifest["inputs"], case_id=case_id),

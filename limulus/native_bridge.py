@@ -20,26 +20,50 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
-def _expected_native_runtime_sources(repo_root: Path | None = None) -> tuple[Path, ...]:
+def _native_rust_sources(repo_root: Path | None = None) -> tuple[Path, ...]:
     resolved_repo_root = repo_root or _repo_root()
-    native_src_root = resolved_repo_root / "native" / "limulus_native" / "src"
-    split_modules = [
-        "ast.rs",
-        "diagnostics.rs",
-        "expressions/mod.rs",
-        "expressions/functions.rs",
-        "runtime/mod.rs",
-        "runtime/state.rs",
-        "output/mod.rs",
-        "output/accumulator.rs",
-        "row_cursor.rs",
-        "value_ref.rs",
-    ]
-    staged_modules = ("source_view.rs",)
-    for module_name in staged_modules:
-        if (native_src_root / module_name).exists():
-            split_modules.append(module_name)
-    return (native_src_root / "lib.rs", *(native_src_root / name for name in split_modules))
+    native_root = resolved_repo_root / "native" / "limulus_native"
+    native_src_root = native_root / "src"
+    if not native_src_root.is_dir():
+        return ()
+    crate_root_sources = (native_root / "build.rs",)
+    return tuple(
+        sorted(
+            (
+                path
+                for path in (*native_src_root.rglob("*.rs"), *crate_root_sources)
+                if path.is_file() and not path.is_symlink()
+            ),
+            key=lambda path: path.relative_to(resolved_repo_root).as_posix(),
+        )
+    )
+
+
+def _native_freshness_inputs(repo_root: Path | None = None) -> tuple[Path, ...]:
+    resolved_repo_root = repo_root or _repo_root()
+    native_root = resolved_repo_root / "native" / "limulus_native"
+    build_inputs = (
+        native_root / "Cargo.lock",
+        native_root / "Cargo.toml",
+        resolved_repo_root / ".cargo" / "config.toml",
+        resolved_repo_root / "pyproject.toml",
+    )
+    return tuple(
+        sorted(
+            (
+                path
+                for path in (*_native_rust_sources(resolved_repo_root), *build_inputs)
+                if path.is_file() and not path.is_symlink()
+            ),
+            key=lambda path: path.relative_to(resolved_repo_root).as_posix(),
+        )
+    )
+
+
+def _expected_native_runtime_sources(repo_root: Path | None = None) -> tuple[Path, ...]:
+    """Return the complete Rust source inventory for compatibility with callers."""
+
+    return _native_rust_sources(repo_root)
 
 
 def _newest_native_source(repo_root: Path | None = None) -> Path | None:
@@ -47,14 +71,15 @@ def _newest_native_source(repo_root: Path | None = None) -> Path | None:
     native_root = resolved_repo_root / "native" / "limulus_native"
     src_root = native_root / "src"
     cargo_toml = native_root / "Cargo.toml"
-    if not src_root.exists() or not cargo_toml.exists():
+    pyproject_toml = resolved_repo_root / "pyproject.toml"
+    if not src_root.is_dir() or not cargo_toml.is_file() or not pyproject_toml.is_file():
         return None
 
-    expected_sources = _expected_native_runtime_sources(resolved_repo_root)
-    if any(not path.exists() for path in expected_sources):
+    freshness_inputs = _native_freshness_inputs(resolved_repo_root)
+    if not _native_rust_sources(resolved_repo_root) or not freshness_inputs:
         return None
 
-    return max((cargo_toml, *expected_sources), key=lambda path: path.stat().st_mtime)
+    return max(freshness_inputs, key=lambda path: path.stat().st_mtime)
 
 
 def _workspace_native_artifact_candidates(repo_root: Path | None = None) -> tuple[Path, ...]:
@@ -124,17 +149,9 @@ def _detect_native_source_drift(module: Any) -> str | None:
     native_root = repo_root / "native" / "limulus_native"
     src_root = native_root / "src"
     cargo_toml = native_root / "Cargo.toml"
-    if not src_root.exists() or not cargo_toml.exists():
+    pyproject_toml = repo_root / "pyproject.toml"
+    if not src_root.is_dir() or not cargo_toml.is_file() or not pyproject_toml.is_file():
         return None
-
-    expected_sources = _expected_native_runtime_sources(repo_root)
-    missing_sources = [path for path in expected_sources if not path.exists()]
-    if missing_sources:
-        missing_labels = ", ".join(path.name for path in missing_sources)
-        return (
-            "limulus native source tree is missing expected split runtime modules "
-            f"({missing_labels}); rebuild or restore the native runtime module group before running rust/auto workloads"
-        )
 
     newest_source = _newest_native_source(repo_root)
     if newest_source is None:

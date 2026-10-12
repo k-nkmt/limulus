@@ -1,0 +1,48 @@
+start: comments? statement (";" comments? statement?)*
+
+comments: comment_stmt+
+
+comment_stmt: LINE_COMMENT
+
+statement: data_stmt
+         | run_stmt
+         | skip_stmt
+         | other_stmt
+
+skip_stmt: macro_line_stmt
+         | macro_block_stmt
+         | proc_block_stmt
+
+macro_line_stmt: MACRO_LINE
+macro_block_stmt: MACRO_BLOCK
+proc_block_stmt: PROC_BLOCK
+
+data_stmt: DATA_KW stmt_tail?
+run_stmt: RUN_KW stmt_tail?
+other_stmt: stmt_tail
+
+stmt_tail: stmt_part+
+stmt_part: SQ_STRING
+         | DQ_STRING
+         | OTHER_TEXT
+         | SQ_OPEN
+         | DQ_OPEN
+
+DATA_KW.5: /(?ai:data)\b/
+RUN_KW.5: /(?ai:run)\b/
+MACRO_LINE.10: /%(?ai:let|put)\b(?:[^;'"]|'(?:''|[^'])*'|"(?:""|[^"])*")*|%\*(?:[^;'"]|'(?:''|[^'])*'|"(?:""|[^"])*")*/
+MACRO_BLOCK.10: /%(?ai:macro)\b(?:[^'"]|'(?:''|[^'])*'|"(?:""|[^"])*")*?%(?ai:mend)\b(?:\s+[A-Za-z_][A-Za-z0-9_]*)?\s*/
+PROC_BLOCK.10: /(?ai:proc)\b(?:[^'"]|'(?:''|[^'])*'|"(?:""|[^"])*")*?(?:\b(?ai:run)\b|\b(?ai:quit)\b)\s*/
+SQ_STRING.6: /'(?:''|[^'])*'/
+DQ_STRING.6: /"(?:""|[^"])*"/
+OTHER_TEXT: /(?!(?ai:(?:data|run))\b)[^;'"\t\n\f\r ]+/
+SQ_OPEN.4: /'(?:''|[^';])*/
+DQ_OPEN.4: /"(?:""|[^";])*/
+
+LINE_COMMENT.10: /\*(?!\/)[^;]*;/
+BLOCK_COMMENT.10: /\/\*[\s\S]*?\*\//
+
+%ignore BLOCK_COMMENT
+
+%import common.WS
+%ignore WS

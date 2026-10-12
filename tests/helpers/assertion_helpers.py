@@ -9,10 +9,24 @@ def _decode_metadata_value(value: bytes | None) -> str | None:
     return value.decode("utf-8", errors="replace")
 
 
-def _case_context(*, case_id: str, backend: str | None = None, runtime_backend: str | None = None) -> str:
+def _case_context(
+    *,
+    case_id: str,
+    backend: str | None = None,
+    runtime_backend: str | None = None,
+    expected_strategy: str | None = None,
+    expected_engine: str | None = None,
+    actual_engine: str | None = None,
+) -> str:
     parts = [f"case={case_id}"]
     if backend is not None:
         parts.append(f"expected_backend={backend}")
+    if expected_strategy is not None:
+        parts.append(f"expected_strategy={expected_strategy}")
+    if expected_engine is not None:
+        parts.append(f"expected_engine={expected_engine}")
+    if actual_engine is not None:
+        parts.append(f"actual_engine={actual_engine}")
     if runtime_backend is not None:
         parts.append(f"runtime_backend={runtime_backend}")
     return ", ".join(parts)
@@ -37,9 +51,11 @@ def assert_backend_choice(
     *,
     case_id: str,
     runtime_backend: str,
+    strategy: str | None = None,
+    engine: str | None = None,
 ) -> None:
     assert actual == expected, (
-        f"{_case_context(case_id=case_id, backend=expected, runtime_backend=runtime_backend)}: "
+        f"{_case_context(case_id=case_id, backend=expected, runtime_backend=runtime_backend, expected_strategy=strategy, expected_engine=engine, actual_engine=actual)}: "
         f"got backend {actual!r}"
     )
 

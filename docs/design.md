@@ -22,24 +22,22 @@ Rather than rarely-used edge cases or SAS language-specific quirks, it prioritiz
 ```text
 Session.submit()
   -> DataStepExecutor.execute()
-    -> ExecutionPipelineCoordinator
-      1) macro hook / unsupported syntax skip
-      2) split blocks
-      3) parse
-      4) validate
-      5) resolve inputs
-      6) pre-processing inputs
-      7) pre-evaluations
-      8) plan generation
-      9) execute runtime backend
-     10) resolve outputs (temporary/internal variable filtering)
-     11) apply output metadata
-  -> Session.datasets update
+      1) apply the configured macro hook
+      2) parse the complete source, identify DATA blocks, and skip recognized PROC/macros
+      3) check program-level parse diagnostics before executing any block
+      for each DATA block:
+        4) validate dataset references and declarations
+        5) plan source-owned helpers and output targets
+        6) resolve and prepare Arrow inputs (options, BY, SET/MERGE, helper columns)
+        7) assemble the execution and output-shaping plans
+        8) execute the Rust row runtime
+        9) remove internal variables and restore output types/metadata
+       10) make successful outputs available to subsequent blocks
+  -> Session.datasets update on successful submission
 ```
 
-
 ### 1. Unsupported PROC / Macro Skip
-Before block splitting, limulus masks a narrow subset of unsupported legacy syntax so mixed source files can still reach the Data Step parser.
+The parser recognizes and skips a narrow subset of unsupported syntax so mixed source files can still reach the Data Step parser.
 
 Current skip scope:
 
@@ -54,60 +52,56 @@ These constructs are skipped rather than executed. Open-code macro expansion and
 ### 2. Block Splitting
 Code passed to `submit()` is split into `DATA ... RUN;` units and executed sequentially.  
 This means that when multiple blocks are passed at once, the output of an earlier block can be referenced as input by subsequent blocks.
+The complete source is parsed before any block executes; program-level parse errors stop the submission at this stage.
 
 ### 3. Parsing
 Data Step code is currently parsed using [lark](https://github.com/lark-parser/lark).
-The parser produces a structured internal representation that can be inspected programmatically.  
+The parser produces a structured internal representation that can be inspected
+programmatically.
 
-For example, code like `data out; set iris(in=in1) ; where sepal_length > 5; if species ^= 'setosa'; keep species sepal_length sepal_width ;run;` is currently recognized as the following statement structure:
+For example, the following one-line text is recognized as the structure shown below:
 
-```text
-start
-  statement
-    data_stmt
-      data_kw	data
-      dataset_ref
-        dataset_name	out
-  statement
-    set_stmt
-      set_kw	set
-      set_component
-        dataset_ref
-          dataset_name	iris
-          dataset_options
-            dataset_option	in=in1
-  statement
-    where_stmt	where sepal_length > 5
-  statement
-    if_stmt
-      subset_if_stmt	if species ^= 'setosa' 
-  statement
-    keep_stmt	keep species sepal_length sepal_width  
-  statement
-    run_stmt	run
+```sas
+data out; set iris(in=in1) ; where sepal_length > 5; if species ^= 'setosa'; keep species sepal_length sepal_width ;run;
 ```
 
-The exact internal rule names may evolve over time, but the important point is that statements, dataset references, and options are separated before execution starts.
+Current parsed structure (simplified):
+
+```text
+Program
+  DATA block
+    DATA: output dataset "out"
+    SET: input dataset "iris", IN variable "in1"
+    WHERE: greater-than comparison
+      column: sepal_length
+      number: 5
+    IF (row filter): not-equal comparison
+      column: species
+      string: "setosa"
+    KEEP: species, sepal_length, sepal_width
+    RUN: end of block
+```
+
+Statements, dataset references, options, and expressions are separated before
+execution starts.
 
 ### 4. Input Resolution
 
-References specified in `SET` / `MERGE` are resolved in the following order:
+`SET` / `MERGE` can read datasets loaded into the session or produced by earlier
+DATA blocks. Dataset and column names are case-insensitive, and the `work.` prefix
+is optional for dataset names. Column helpers such as `select`, `where`, and `assign`
+also resolve column names case-insensitively when the match is unique.
+Input options, BY ordering, and SET/MERGE preparation are handled in Python before
+Rust executes the rows.
 
-- Specified at `submit()` time
-- Inputs registered via `Session.loads()`
-- Outputs produced by earlier blocks within the same `submit()` call
-
-Dataset name resolution is case-insensitive and handles the `work.` prefix transparently. Column-oriented helpers such as `select`, `where`, `transpose`, `assign`, and `cast` also resolve column names case-insensitively when the match is unique.
-
-### 5. Backend Selection
+### 5. Rust Row Engine
 Row-oriented processing tends to be less efficient than column-oriented processing.  
 To improve execution speed, a Rust-based runtime module is provided.  
-The Rust backend is used by default.  
-Supported `apply()` calls do not force a whole-block Python row loop. When the function target can be resolved up front from a string name, the row loop stays on Rust and only the callable invocation crosses a narrow Python gateway. This keeps builtins, dotted module functions, and in-scope helper functions available without restoring broad Python runtime ownership.
+Rust is the only Data Step row engine. `auto`, explicit `rust`, and the `python`
+preference all select it. Errors are returned without retrying a Python row engine.
 
-Input-stage dataset options such as `keep=`, `drop=`, `where=`, `rename=`, `firstobs=`, and `obs=` are normalized in shared Python-side preprocessing before the runtime loop when needed. This keeps the row-loop semantics consistent across Python and Rust backends without duplicating the same preparation rules in multiple runtimes.
-
-By contrast, `MERGE` preparation and `lag(...)` / `lead(...)` rewrite materialization remain part of `pre-evaluations`. Those steps depend on statement semantics and runtime rewrite planning, not only on source dataset option normalization.
+Supported `apply()` calls keep the row loop in Rust and invoke only the named Python
+callable. Other expressions are evaluated by the native runtime.
 
 ### 6. Session Helpers and Metadata Views
 
@@ -116,13 +110,13 @@ In addition to `submit()`, `Session` and `DatasetView` provide user-facing helpe
 - `transpose(...)` offers a compact reshape helper for common wide/long conversions.
 - `assign(...)` adds or replaces columns from expressions, literals, and `case when` logic while keeping left-to-right assignment order.
 - `assign(...)` and the DSL both support limited built-in `put(...)`, `input(...)`, and `hour(...)` conversion helpers.
-- `Session` maintains a shared format / informat registry. Built-in families cover `best.` / `w.` / `w.d` / `w.d.`, `zw.` / `zw.d` / `zw.d.`, `commaw.` / `commaw.d` / `commaw.d.`, and named forms such as `e8601da.`, `e8601dt.`, `yymmdd6.`, `yymmdd8.`, `yymmdd10.`, and `time.`. 
+- `Session` maintains a shared format / informat registry. Built-in families cover `best.` / `w.` / `w.d` / `w.d.`, `zw.` / `zw.d` / `zw.d.`, `commaw.` / `commaw.d` / `commaw.d.`, and named forms such as `e8601da.`, `e8601dt.`, `yymmdd6.`, `yymmdd8.`, `yymmdd10.`, and `time.`. User catalogs must be mappings serializable to the Rust runtime; callable format/informat registration is unsupported.
 - `astype(...)` / `cast(...)` remain helper-oriented type conversion APIs, can materialize into a new dataset by using `out=`, and can write cast results into new columns by using `alias=`.
 - `sql(...)` provides practical session-level querying, including read queries, `CREATE TABLE ... AS ...`, and `DROP TABLE ...`.
 - `dictionary.tables`, `dictionary.columns`, and dataset-scoped dictionary views expose session metadata such as labels, row counts, and Arrow column types.
 
 ### 7. Row Loop Processing
-Manages the basic per-row loop processing and its associated automatic variables.
+The Rust runtime manages the basic per-row loop processing and its associated automatic variables.
 
 - `_N_`: incremented on each row iteration
 - `_ERROR_`: initialized to 0 at the start of each row; set to 1 on execution errors
@@ -132,13 +126,15 @@ Manages the basic per-row loop processing and its associated automatic variables
 - If no explicit `OUTPUT` is present, the default output destination (usually the first DATA target) is used
 
 ### 8. Output Conversion and Session Update
-Processed results are converted to `arrow_table` and then reflected in the catalog.  
+Processed results are finalized as Arrow tables and then reflected in the catalog.
 This allows `session["name"]` to be retrieved as an Arrow Table.
 
 In the output stage, internal temporary variables are also removed in a backend-agnostic way.
 This includes helper variables created by `IN=`, `INDSNAME=`, `END=`, and `FIRST./LAST.` (including renamed aliases).
 
 Dataset labels are stored in Arrow schema metadata under `memlabel`, and column labels are stored in each Arrow field's custom metadata. This allows label information produced by `DATA ... (label="...")` and `LABEL` statements to survive round-trips through `Session`.
+
+Successful submissions add their output tables to `Session.datasets`.
 
 ### 9. Stage-aware Diagnostics and Logs
 
@@ -150,9 +146,9 @@ When source text is available, log output also includes short source excerpts. T
 
 ## Input Data
 
-Arrow, Polars, and Pandas are supported as input formats.  
+Arrow, Polars and Pandas are supported as public input formats.
 For CSV, Parquet, sas7bdat, or other file formats, load them first with any library of your choice.  
-Internally, limulus uses Arrow for data exchange, so Arrow or Polars inputs are recommended for best performance.
+Internally, limulus normalizes supported inputs to Arrow for data exchange, so Arrow or Polars inputs are recommended for best performance.
 
 
 ## Performance

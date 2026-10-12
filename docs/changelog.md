@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented on this page.
 
+## [v0.6.0] - 2026-10-12
+
+### Changed
+
+- Reworked the Data Step parser and unified row execution in the Rust runtime.
+- Extended string expressions and `apply()` support for registered Python functions.
+- Standard string functions now support Unicode and count characters instead of bytes, similar to K functions.
+- Custom format/informat catalogs now accept dictionary mappings only.
+- Added warnings for repeated BY values across MERGE inputs.
+
+### Fixed
+
+- Improved missing-value handling and preservation of Arrow values, types, and metadata.
+
 ## [v0.5.0] - 2026-06-04
 
 `v0.3.x` and `v0.4.x` are treated as internal development milestones, and this section summarizes the changes rolled up into `v0.5.0`.

@@ -1,0 +1,95 @@
+// General Data Step expression grammar.
+//
+// The precedence layers and binding powers mirror the native Pratt parser
+// (native/limulus_native/src/expressions/mod.rs parse_expression 546-675),
+// with "||" added as the loosest (docs-restored) concat level below `or`:
+//   concat(left-assoc)  or(1,2)  and(3,4)  comparison(5,6)  +- (7,8)
+//   * / mod (9,10)  ** (11,11)
+// Prefix `not` and `-` parse their operand at binding power 11, i.e. at the
+// power level, so `-a ** b` is -(a ** b) and `**` is right-associative.
+// Explicit parentheses are structurally transparent exactly like the native
+// LParen branch: the tree shape keeps the explicit grouping, and every node
+// keeps its own raw source span.
+//
+// The pinned general-expression positions and primary forms:
+// - concat:  `||` chains live at the loosest level and are accepted at
+//   every general-expression position (top level, parentheses, call
+//   arguments, subscript brackets), so nested chains like a||(b||c) and
+//   subscript operands like x[i||j] structure naturally.  A chain holds
+//   two or more NON-EMPTY or_expr-level parts (left chains flatten into
+//   ConcatSyntax parts); there is no empty-part production, so "||",
+//   "a||", "||b" and "a||||b" reject with the missing-operand cause and no
+//   empty-string operand is ever supplemented.  Commas stay argument
+//   delimiters: cats(a||b,c) has two arguments.  Quoted 'a ** 2' /
+//   'a || b' contents are never rewritten;
+// - calls:      NAME "(" [args] ")"  -> CallSyntax; arguments are full
+//   concat-level expressions (zero, one, many, nested); array element
+//   calls name(i) stay CallSyntax and are never bound to any registry;
+// - subscripts: NAME "[" concat_expr "]" and NAME "{" concat_expr "}" ->
+//   SubscriptSyntax (native ArrayRef supports only the name+bracket
+//   placement; the delimiter is not recorded by native or by the model);
+// - format tokens: the second top-level argument of a put/input call whose
+//   bare lexeme matches the legacy _BARE_FORMAT_TOKEN shape (best12.,
+//   $char., z8.2., comma8., 8., 1.2.) becomes LiteralSyntax(kind="format")
+//   with the untouched raw lexeme; everything else keeps the native
+//   tokenizer classes (the digit trailing-dot "8." before ',' or ')'
+//   stays a text literal outside put/input).
+//
+// The source `=` alias keeps its raw occurrence span (normalized to Eq in
+// the node), ^= / ~= / ¬= normalize to !=, and decimal integers are
+// validated against the native i64 -> u64 token order.
+//
+// There is no second parsing backend.
+
+start: concat_expr
+
+concat_expr: concat_expr CONCAT or_expr | or_expr
+
+or_expr: or_expr KW_OR and_expr | and_expr
+and_expr: and_expr KW_AND cmp_expr | cmp_expr
+cmp_expr: cmp_expr CMP_OP add_expr | add_expr
+add_expr: add_expr PLUS mul_expr | add_expr MINUS mul_expr | mul_expr
+mul_expr: mul_expr STAR pow_expr | mul_expr SLASH pow_expr | mul_expr KW_MOD pow_expr | pow_expr
+pow_expr: unary POW pow_expr | unary
+unary: KW_NOT pow_expr | MINUS pow_expr | atom
+atom: LPAREN concat_expr RPAREN | call | subscript | literal | name
+call: NAME LPAREN RPAREN | NAME LPAREN call_args RPAREN
+call_args: call_args COMMA arg | arg
+arg: concat_expr |
+subscript: NAME LBRACKET concat_expr RBRACKET | NAME LBRACE concat_expr RBRACE
+?literal: STRING | MISSING | NUMBER_DOT | NUMDOT_TRAILING | NUMDOT_TEXT | INTEGER
+?name: NAME
+
+STRING: /(?:'[^']*'|"[^"]*")/
+MISSING: /\./
+NUMBER_DOT: /(?:\.[0-9]+|[0-9]+\.[0-9.]*[0-9])/
+NUMDOT_TRAILING.2: /(?:[0-9]|\.[0-9])[0-9.]*\.(?![0-9.])/
+NUMDOT_TEXT.3: /(?:[0-9]|\.[0-9])[0-9.]*\.(?=\s*[,\)])/
+INTEGER: /[0-9]+/
+NAME: /[A-Za-z_$][A-Za-z0-9_.]*/
+KW_OR.3: /(?ai:or)(?![A-Za-z0-9_.])/
+KW_AND.3: /(?ai:and)(?![A-Za-z0-9_.])/
+KW_NOT.3: /(?ai:not)(?![A-Za-z0-9_.])/
+KW_MOD.3: /(?ai:mod)(?![A-Za-z0-9_.])/
+CMP_OP: /(?:==|!=|~=|\^=|¬=|>=|<=|>|<|=)/
+POW.2: /\*\*/
+CONCAT: /\|\|/
+STAR: /\*/
+SLASH: /\//
+PLUS: /\+/
+MINUS: /-/
+LPAREN: /\(/
+RPAREN: /\)/
+LBRACKET: /\[/
+RBRACKET: /\]/
+LBRACE: /\{/
+RBRACE: /\}/
+COMMA: /,/
+
+// Native tokenizer whitespace parity: Python re
+// \s and str.isspace() treat U+001C..U+001F (file/group/record/unit
+// separators) as whitespace, but the native tokenizer follows the Unicode
+// White_Space property (Rust char::is_whitespace), which excludes them and
+// rejects them as unknown characters ("unexpected token: <char>").  The
+// class [^\S\x1c-\x1f] is "whitespace minus those separators".
+%ignore /[^\S\x1c-\x1f]+/

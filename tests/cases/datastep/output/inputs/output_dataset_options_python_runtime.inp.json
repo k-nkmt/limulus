@@ -1,7 +1,0 @@
-{
-  "columns": ["id", "name", "tmp"],
-  "rows": [
-    [1, "Alice", "a"],
-    [2, "Bob", "b"]
-  ]
-}

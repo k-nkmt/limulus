@@ -1,0 +1,1765 @@
+{
+  "valid_program": {
+    "version": 1,
+    "output_targets": [
+      "WORK.OUT",
+      "work.out",
+      "work.empty"
+    ],
+    "default_target": "explicit-unregistered-default",
+    "suppress_implicit_output": true,
+    "effective_output_options": {
+      "work.out": {
+        "in_var": null,
+        "keep_vars": [
+          "id"
+        ],
+        "drop_vars": [
+          "raw"
+        ],
+        "where_expr": {
+          "kind": "logical",
+          "operator": "and",
+          "operands": [
+            {
+              "kind": "comparison",
+              "column": "id",
+              "operator": ">=",
+              "value": 1
+            },
+            {
+              "kind": "not",
+              "operand": {
+                "kind": "null",
+                "column": "deleted",
+                "negated": false
+              }
+            }
+          ]
+        },
+        "rename_map": {
+          "id": "key"
+        },
+        "firstobs": 2,
+        "obs": 5
+      },
+      "WORK.EMPTY": {
+        "in_var": null,
+        "keep_vars": [],
+        "drop_vars": [],
+        "where_expr": null,
+        "rename_map": {},
+        "firstobs": null,
+        "obs": null
+      }
+    },
+    "statements": [
+      {
+        "kind": "DATA",
+        "payload": {
+          "tag": "data",
+          "outputs": [
+            {
+              "name": "out",
+              "options": {
+                "in_var": null,
+                "keep_vars": [
+                  "id"
+                ],
+                "drop_vars": [],
+                "where_expr": null,
+                "rename_map": {},
+                "firstobs": null,
+                "obs": null
+              },
+              "span": {
+                "start": 0,
+                "end": 7,
+                "line": 1,
+                "column": 1,
+                "end_line": 1,
+                "end_column": 8,
+                "source_id": "typed-payload-fixture"
+              }
+            }
+          ]
+        },
+        "display_text": "payload",
+        "span": {
+          "start": 0,
+          "end": 7,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 8,
+          "source_id": "typed-payload-fixture"
+        },
+        "origin": null,
+        "apply_references": []
+      },
+      {
+        "kind": "SET",
+        "payload": {
+          "tag": "source",
+          "refs": [
+            {
+              "name": "input",
+              "options": {
+                "in_var": "seen",
+                "keep_vars": [
+                  "id"
+                ],
+                "drop_vars": [
+                  "raw"
+                ],
+                "where_expr": {
+                  "kind": "logical",
+                  "operator": "and",
+                  "operands": [
+                    {
+                      "kind": "comparison",
+                      "column": "id",
+                      "operator": ">=",
+                      "value": 1
+                    },
+                    {
+                      "kind": "not",
+                      "operand": {
+                        "kind": "null",
+                        "column": "deleted",
+                        "negated": false
+                      }
+                    }
+                  ]
+                },
+                "rename_map": {
+                  "id": "key"
+                },
+                "firstobs": 2,
+                "obs": 5
+              },
+              "span": {
+                "start": 0,
+                "end": 7,
+                "line": 1,
+                "column": 1,
+                "end_line": 1,
+                "end_column": 8,
+                "source_id": "typed-payload-fixture"
+              }
+            }
+          ],
+          "options": {
+            "indsname_var": "source",
+            "end_var": "last"
+          }
+        },
+        "display_text": "payload",
+        "span": {
+          "start": 0,
+          "end": 7,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 8,
+          "source_id": "typed-payload-fixture"
+        },
+        "origin": null,
+        "apply_references": []
+      },
+      {
+        "kind": "MERGE",
+        "payload": {
+          "tag": "source",
+          "refs": [
+            {
+              "name": "input",
+              "options": {
+                "in_var": "seen",
+                "keep_vars": [
+                  "id"
+                ],
+                "drop_vars": [
+                  "raw"
+                ],
+                "where_expr": {
+                  "kind": "logical",
+                  "operator": "and",
+                  "operands": [
+                    {
+                      "kind": "comparison",
+                      "column": "id",
+                      "operator": ">=",
+                      "value": 1
+                    },
+                    {
+                      "kind": "not",
+                      "operand": {
+                        "kind": "null",
+                        "column": "deleted",
+                        "negated": false
+                      }
+                    }
+                  ]
+                },
+                "rename_map": {
+                  "id": "key"
+                },
+                "firstobs": 2,
+                "obs": 5
+              },
+              "span": {
+                "start": 0,
+                "end": 7,
+                "line": 1,
+                "column": 1,
+                "end_line": 1,
+                "end_column": 8,
+                "source_id": "typed-payload-fixture"
+              }
+            }
+          ],
+          "options": {
+            "indsname_var": null,
+            "end_var": null
+          }
+        },
+        "display_text": "payload",
+        "span": {
+          "start": 0,
+          "end": 7,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 8,
+          "source_id": "typed-payload-fixture"
+        },
+        "origin": null,
+        "apply_references": []
+      },
+      {
+        "kind": "WHERE",
+        "payload": {
+          "tag": "where",
+          "condition": {
+            "tag": "deferred",
+            "span": {
+              "start": 0,
+              "end": 7,
+              "line": 1,
+              "column": 1,
+              "end_line": 1,
+              "end_column": 8,
+              "source_id": "typed-payload-fixture"
+            },
+            "origin": null,
+            "error_kind": "unsupported_expression",
+            "native_cause": "unsupported expression syntax",
+            "where_syntax_summary": "saved where summary",
+            "display_text": "display-only expression",
+            "apply_references": [
+              {
+                "target": "lookup",
+                "call_span": {
+                  "start": 0,
+                  "end": 7,
+                  "line": 1,
+                  "column": 1,
+                  "end_line": 1,
+                  "end_column": 8,
+                  "source_id": "typed-payload-fixture"
+                },
+                "owner_span": {
+                  "start": 0,
+                  "end": 7,
+                  "line": 1,
+                  "column": 1,
+                  "end_line": 1,
+                  "end_column": 8,
+                  "source_id": "typed-payload-fixture"
+                }
+              }
+            ]
+          }
+        },
+        "display_text": "payload",
+        "span": {
+          "start": 0,
+          "end": 7,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 8,
+          "source_id": "typed-payload-fixture"
+        },
+        "origin": null,
+        "apply_references": [
+          {
+            "target": "lookup",
+            "call_span": {
+              "start": 0,
+              "end": 7,
+              "line": 1,
+              "column": 1,
+              "end_line": 1,
+              "end_column": 8,
+              "source_id": "typed-payload-fixture"
+            },
+            "owner_span": {
+              "start": 0,
+              "end": 7,
+              "line": 1,
+              "column": 1,
+              "end_line": 1,
+              "end_column": 8,
+              "source_id": "typed-payload-fixture"
+            }
+          }
+        ]
+      },
+      {
+        "kind": "ASSIGN",
+        "payload": {
+          "tag": "assign",
+          "target": {
+            "tag": "array_element",
+            "name": "items",
+            "delimiter": "[",
+            "index": {
+              "tag": "subscript",
+              "span": {
+                "start": 0,
+                "end": 7,
+                "line": 1,
+                "column": 1,
+                "end_line": 1,
+                "end_column": 8,
+                "source_id": "typed-payload-fixture"
+              },
+              "origin": null,
+              "base": {
+                "tag": "name",
+                "span": {
+                  "start": 0,
+                  "end": 7,
+                  "line": 1,
+                  "column": 1,
+                  "end_line": 1,
+                  "end_column": 8,
+                  "source_id": "typed-payload-fixture"
+                },
+                "origin": null,
+                "name": "items"
+              },
+              "index": {
+                "tag": "literal",
+                "span": {
+                  "start": 0,
+                  "end": 7,
+                  "line": 1,
+                  "column": 1,
+                  "end_line": 1,
+                  "end_column": 8,
+                  "source_id": "typed-payload-fixture"
+                },
+                "origin": {
+                  "start": 0,
+                  "end": 8,
+                  "line": 1,
+                  "column": 1,
+                  "end_line": 1,
+                  "end_column": 9,
+                  "source_id": "typed-origin"
+                },
+                "kind": "numeric",
+                "lexeme": "9223372036854775808"
+              }
+            },
+            "span": {
+              "start": 0,
+              "end": 7,
+              "line": 1,
+              "column": 1,
+              "end_line": 1,
+              "end_column": 8,
+              "source_id": "typed-payload-fixture"
+            }
+          },
+          "value": {
+            "tag": "concat",
+            "span": {
+              "start": 0,
+              "end": 7,
+              "line": 1,
+              "column": 1,
+              "end_line": 1,
+              "end_column": 8,
+              "source_id": "typed-payload-fixture"
+            },
+            "origin": null,
+            "parts": [
+              {
+                "tag": "literal",
+                "span": {
+                  "start": 0,
+                  "end": 7,
+                  "line": 1,
+                  "column": 1,
+                  "end_line": 1,
+                  "end_column": 8,
+                  "source_id": "typed-payload-fixture"
+                },
+                "origin": null,
+                "kind": "string",
+                "lexeme": "'東京 🦑'"
+              },
+              {
+                "tag": "name",
+                "span": {
+                  "start": 0,
+                  "end": 7,
+                  "line": 1,
+                  "column": 1,
+                  "end_line": 1,
+                  "end_column": 8,
+                  "source_id": "typed-payload-fixture"
+                },
+                "origin": null,
+                "name": "value"
+              },
+              {
+                "tag": "literal",
+                "span": {
+                  "start": 0,
+                  "end": 7,
+                  "line": 1,
+                  "column": 1,
+                  "end_line": 1,
+                  "end_column": 8,
+                  "source_id": "typed-payload-fixture"
+                },
+                "origin": null,
+                "kind": "missing",
+                "lexeme": "."
+              }
+            ]
+          }
+        },
+        "display_text": "payload",
+        "span": {
+          "start": 0,
+          "end": 7,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 8,
+          "source_id": "typed-payload-fixture"
+        },
+        "origin": {
+          "start": 0,
+          "end": 8,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 9,
+          "source_id": "typed-origin"
+        },
+        "apply_references": [
+          {
+            "target": "lookup",
+            "call_span": {
+              "start": 0,
+              "end": 7,
+              "line": 1,
+              "column": 1,
+              "end_line": 1,
+              "end_column": 8,
+              "source_id": "typed-payload-fixture"
+            },
+            "owner_span": {
+              "start": 0,
+              "end": 7,
+              "line": 1,
+              "column": 1,
+              "end_line": 1,
+              "end_column": 8,
+              "source_id": "typed-payload-fixture"
+            }
+          }
+        ]
+      },
+      {
+        "kind": "ASSIGN",
+        "payload": {
+          "tag": "deferred",
+          "error_kind": "unsupported_inline_action",
+          "native_cause": "unsupported inline action: opaque action",
+          "where_syntax_summary": "saved action summary",
+          "span": {
+            "start": 0,
+            "end": 7,
+            "line": 1,
+            "column": 1,
+            "end_line": 1,
+            "end_column": 8,
+            "source_id": "typed-payload-fixture"
+          },
+          "display_text": "opaque action"
+        },
+        "display_text": "payload",
+        "span": {
+          "start": 0,
+          "end": 7,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 8,
+          "source_id": "typed-payload-fixture"
+        },
+        "origin": null,
+        "apply_references": []
+      },
+      {
+        "kind": "SUM",
+        "payload": {
+          "tag": "sum",
+          "target": {
+            "tag": "name",
+            "name": "total",
+            "span": {
+              "start": 0,
+              "end": 7,
+              "line": 1,
+              "column": 1,
+              "end_line": 1,
+              "end_column": 8,
+              "source_id": "typed-payload-fixture"
+            }
+          },
+          "increment": {
+            "tag": "unary",
+            "span": {
+              "start": 0,
+              "end": 7,
+              "line": 1,
+              "column": 1,
+              "end_line": 1,
+              "end_column": 8,
+              "source_id": "typed-payload-fixture"
+            },
+            "origin": null,
+            "operator": "-",
+            "operand": {
+              "tag": "literal",
+              "span": {
+                "start": 0,
+                "end": 7,
+                "line": 1,
+                "column": 1,
+                "end_line": 1,
+                "end_column": 8,
+                "source_id": "typed-payload-fixture"
+              },
+              "origin": {
+                "start": 0,
+                "end": 8,
+                "line": 1,
+                "column": 1,
+                "end_line": 1,
+                "end_column": 9,
+                "source_id": "typed-origin"
+              },
+              "kind": "numeric",
+              "lexeme": "9223372036854775808"
+            }
+          }
+        },
+        "display_text": "payload",
+        "span": {
+          "start": 0,
+          "end": 7,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 8,
+          "source_id": "typed-payload-fixture"
+        },
+        "origin": null,
+        "apply_references": []
+      },
+      {
+        "kind": "KEEP",
+        "payload": {
+          "tag": "name_list",
+          "names": [
+            {
+              "tag": "name",
+              "span": {
+                "start": 0,
+                "end": 7,
+                "line": 1,
+                "column": 1,
+                "end_line": 1,
+                "end_column": 8,
+                "source_id": "typed-payload-fixture"
+              },
+              "origin": null,
+              "name": "id"
+            }
+          ]
+        },
+        "display_text": "payload",
+        "span": {
+          "start": 0,
+          "end": 7,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 8,
+          "source_id": "typed-payload-fixture"
+        },
+        "origin": null,
+        "apply_references": []
+      },
+      {
+        "kind": "DROP",
+        "payload": {
+          "tag": "name_list",
+          "names": [
+            {
+              "tag": "name",
+              "span": {
+                "start": 0,
+                "end": 7,
+                "line": 1,
+                "column": 1,
+                "end_line": 1,
+                "end_column": 8,
+                "source_id": "typed-payload-fixture"
+              },
+              "origin": null,
+              "name": "raw"
+            }
+          ]
+        },
+        "display_text": "payload",
+        "span": {
+          "start": 0,
+          "end": 7,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 8,
+          "source_id": "typed-payload-fixture"
+        },
+        "origin": null,
+        "apply_references": []
+      },
+      {
+        "kind": "BY",
+        "payload": {
+          "tag": "name_list",
+          "names": [
+            {
+              "tag": "name",
+              "span": {
+                "start": 0,
+                "end": 7,
+                "line": 1,
+                "column": 1,
+                "end_line": 1,
+                "end_column": 8,
+                "source_id": "typed-payload-fixture"
+              },
+              "origin": null,
+              "name": "group"
+            }
+          ]
+        },
+        "display_text": "payload",
+        "span": {
+          "start": 0,
+          "end": 7,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 8,
+          "source_id": "typed-payload-fixture"
+        },
+        "origin": null,
+        "apply_references": []
+      },
+      {
+        "kind": "RETAIN",
+        "payload": {
+          "tag": "name_list",
+          "names": [
+            {
+              "tag": "name",
+              "span": {
+                "start": 0,
+                "end": 7,
+                "line": 1,
+                "column": 1,
+                "end_line": 1,
+                "end_column": 8,
+                "source_id": "typed-payload-fixture"
+              },
+              "origin": null,
+              "name": "total"
+            }
+          ]
+        },
+        "display_text": "payload",
+        "span": {
+          "start": 0,
+          "end": 7,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 8,
+          "source_id": "typed-payload-fixture"
+        },
+        "origin": null,
+        "apply_references": []
+      },
+      {
+        "kind": "LABEL",
+        "payload": {
+          "tag": "label"
+        },
+        "display_text": "payload",
+        "span": {
+          "start": 0,
+          "end": 7,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 8,
+          "source_id": "typed-payload-fixture"
+        },
+        "origin": null,
+        "apply_references": []
+      },
+      {
+        "kind": "RENAME",
+        "payload": {
+          "tag": "rename",
+          "rename_map": {
+            "id": "key"
+          }
+        },
+        "display_text": "payload",
+        "span": {
+          "start": 0,
+          "end": 7,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 8,
+          "source_id": "typed-payload-fixture"
+        },
+        "origin": null,
+        "apply_references": []
+      },
+      {
+        "kind": "OUTPUT",
+        "payload": {
+          "tag": "output",
+          "targets": [
+            {
+              "name": "out",
+              "options": {
+                "in_var": null,
+                "keep_vars": [
+                  "id"
+                ],
+                "drop_vars": [],
+                "where_expr": null,
+                "rename_map": {},
+                "firstobs": null,
+                "obs": null
+              },
+              "span": {
+                "start": 0,
+                "end": 7,
+                "line": 1,
+                "column": 1,
+                "end_line": 1,
+                "end_column": 8,
+                "source_id": "typed-payload-fixture"
+              }
+            }
+          ]
+        },
+        "display_text": "payload",
+        "span": {
+          "start": 0,
+          "end": 7,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 8,
+          "source_id": "typed-payload-fixture"
+        },
+        "origin": null,
+        "apply_references": []
+      },
+      {
+        "kind": "IF",
+        "payload": {
+          "tag": "if",
+          "condition": {
+            "tag": "call",
+            "span": {
+              "start": 0,
+              "end": 7,
+              "line": 1,
+              "column": 1,
+              "end_line": 1,
+              "end_column": 8,
+              "source_id": "typed-payload-fixture"
+            },
+            "origin": null,
+            "name": "apply.custom",
+            "arguments": [
+              {
+                "tag": "literal",
+                "span": {
+                  "start": 0,
+                  "end": 7,
+                  "line": 1,
+                  "column": 1,
+                  "end_line": 1,
+                  "end_column": 8,
+                  "source_id": "typed-payload-fixture"
+                },
+                "origin": null,
+                "kind": "string",
+                "lexeme": "'東京 🦑'"
+              },
+              {
+                "tag": "name",
+                "span": {
+                  "start": 0,
+                  "end": 7,
+                  "line": 1,
+                  "column": 1,
+                  "end_line": 1,
+                  "end_column": 8,
+                  "source_id": "typed-payload-fixture"
+                },
+                "origin": null,
+                "name": "value"
+              },
+              {
+                "tag": "literal",
+                "span": {
+                  "start": 0,
+                  "end": 7,
+                  "line": 1,
+                  "column": 1,
+                  "end_line": 1,
+                  "end_column": 8,
+                  "source_id": "typed-payload-fixture"
+                },
+                "origin": null,
+                "kind": "format",
+                "lexeme": "z8.2"
+              }
+            ]
+          },
+          "then_action": {
+            "tag": "statement",
+            "statement": {
+              "kind": "ASSIGN",
+              "payload": {
+                "tag": "assign",
+                "target": {
+                  "tag": "name",
+                  "name": "total",
+                  "span": {
+                    "start": 0,
+                    "end": 7,
+                    "line": 1,
+                    "column": 1,
+                    "end_line": 1,
+                    "end_column": 8,
+                    "source_id": "typed-payload-fixture"
+                  }
+                },
+                "value": {
+                  "tag": "call",
+                  "span": {
+                    "start": 0,
+                    "end": 7,
+                    "line": 1,
+                    "column": 1,
+                    "end_line": 1,
+                    "end_column": 8,
+                    "source_id": "typed-payload-fixture"
+                  },
+                  "origin": null,
+                  "name": "apply.custom",
+                  "arguments": [
+                    {
+                      "tag": "literal",
+                      "span": {
+                        "start": 0,
+                        "end": 7,
+                        "line": 1,
+                        "column": 1,
+                        "end_line": 1,
+                        "end_column": 8,
+                        "source_id": "typed-payload-fixture"
+                      },
+                      "origin": null,
+                      "kind": "string",
+                      "lexeme": "'東京 🦑'"
+                    },
+                    {
+                      "tag": "name",
+                      "span": {
+                        "start": 0,
+                        "end": 7,
+                        "line": 1,
+                        "column": 1,
+                        "end_line": 1,
+                        "end_column": 8,
+                        "source_id": "typed-payload-fixture"
+                      },
+                      "origin": null,
+                      "name": "value"
+                    },
+                    {
+                      "tag": "literal",
+                      "span": {
+                        "start": 0,
+                        "end": 7,
+                        "line": 1,
+                        "column": 1,
+                        "end_line": 1,
+                        "end_column": 8,
+                        "source_id": "typed-payload-fixture"
+                      },
+                      "origin": null,
+                      "kind": "format",
+                      "lexeme": "z8.2"
+                    }
+                  ]
+                }
+              },
+              "display_text": "payload",
+              "span": {
+                "start": 0,
+                "end": 7,
+                "line": 1,
+                "column": 1,
+                "end_line": 1,
+                "end_column": 8,
+                "source_id": "typed-payload-fixture"
+              },
+              "origin": null,
+              "apply_references": []
+            }
+          },
+          "is_subset": false,
+          "is_then_do": false
+        },
+        "display_text": "payload",
+        "span": {
+          "start": 0,
+          "end": 7,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 8,
+          "source_id": "typed-payload-fixture"
+        },
+        "origin": null,
+        "apply_references": []
+      },
+      {
+        "kind": "IF",
+        "payload": {
+          "tag": "if",
+          "condition": {
+            "tag": "name",
+            "span": {
+              "start": 0,
+              "end": 7,
+              "line": 1,
+              "column": 1,
+              "end_line": 1,
+              "end_column": 8,
+              "source_id": "typed-payload-fixture"
+            },
+            "origin": null,
+            "name": "value"
+          },
+          "then_action": {
+            "tag": "deferred",
+            "error_kind": "unsupported_inline_action",
+            "native_cause": "unsupported inline action: opaque action",
+            "where_syntax_summary": "saved action summary",
+            "span": {
+              "start": 0,
+              "end": 7,
+              "line": 1,
+              "column": 1,
+              "end_line": 1,
+              "end_column": 8,
+              "source_id": "typed-payload-fixture"
+            },
+            "display_text": "opaque action"
+          },
+          "is_subset": false,
+          "is_then_do": false
+        },
+        "display_text": "payload",
+        "span": {
+          "start": 0,
+          "end": 7,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 8,
+          "source_id": "typed-payload-fixture"
+        },
+        "origin": null,
+        "apply_references": [
+          {
+            "target": "lookup",
+            "call_span": {
+              "start": 0,
+              "end": 7,
+              "line": 1,
+              "column": 1,
+              "end_line": 1,
+              "end_column": 8,
+              "source_id": "typed-payload-fixture"
+            },
+            "owner_span": {
+              "start": 0,
+              "end": 7,
+              "line": 1,
+              "column": 1,
+              "end_line": 1,
+              "end_column": 8,
+              "source_id": "typed-payload-fixture"
+            }
+          }
+        ]
+      },
+      {
+        "kind": "IF",
+        "payload": {
+          "tag": "if",
+          "condition": {
+            "tag": "binary",
+            "span": {
+              "start": 0,
+              "end": 7,
+              "line": 1,
+              "column": 1,
+              "end_line": 1,
+              "end_column": 8,
+              "source_id": "typed-payload-fixture"
+            },
+            "origin": null,
+            "operator": "**",
+            "left": {
+              "tag": "name",
+              "span": {
+                "start": 0,
+                "end": 7,
+                "line": 1,
+                "column": 1,
+                "end_line": 1,
+                "end_column": 8,
+                "source_id": "typed-payload-fixture"
+              },
+              "origin": null,
+              "name": "value"
+            },
+            "right": {
+              "tag": "binary",
+              "span": {
+                "start": 0,
+                "end": 7,
+                "line": 1,
+                "column": 1,
+                "end_line": 1,
+                "end_column": 8,
+                "source_id": "typed-payload-fixture"
+              },
+              "origin": null,
+              "operator": "**",
+              "left": {
+                "tag": "literal",
+                "span": {
+                  "start": 0,
+                  "end": 7,
+                  "line": 1,
+                  "column": 1,
+                  "end_line": 1,
+                  "end_column": 8,
+                  "source_id": "typed-payload-fixture"
+                },
+                "origin": {
+                  "start": 0,
+                  "end": 8,
+                  "line": 1,
+                  "column": 1,
+                  "end_line": 1,
+                  "end_column": 9,
+                  "source_id": "typed-origin"
+                },
+                "kind": "numeric",
+                "lexeme": "9223372036854775808"
+              },
+              "right": {
+                "tag": "literal",
+                "span": {
+                  "start": 0,
+                  "end": 7,
+                  "line": 1,
+                  "column": 1,
+                  "end_line": 1,
+                  "end_column": 8,
+                  "source_id": "typed-payload-fixture"
+                },
+                "origin": null,
+                "kind": "missing",
+                "lexeme": "."
+              }
+            }
+          },
+          "then_action": null,
+          "is_subset": false,
+          "is_then_do": false
+        },
+        "display_text": "payload",
+        "span": {
+          "start": 0,
+          "end": 7,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 8,
+          "source_id": "typed-payload-fixture"
+        },
+        "origin": null,
+        "apply_references": []
+      },
+      {
+        "kind": "ELSE",
+        "payload": {
+          "tag": "else",
+          "action": {
+            "tag": "statement",
+            "statement": {
+              "kind": "ASSIGN",
+              "payload": {
+                "tag": "assign",
+                "target": {
+                  "tag": "name",
+                  "name": "total",
+                  "span": {
+                    "start": 0,
+                    "end": 7,
+                    "line": 1,
+                    "column": 1,
+                    "end_line": 1,
+                    "end_column": 8,
+                    "source_id": "typed-payload-fixture"
+                  }
+                },
+                "value": {
+                  "tag": "call",
+                  "span": {
+                    "start": 0,
+                    "end": 7,
+                    "line": 1,
+                    "column": 1,
+                    "end_line": 1,
+                    "end_column": 8,
+                    "source_id": "typed-payload-fixture"
+                  },
+                  "origin": null,
+                  "name": "apply.custom",
+                  "arguments": [
+                    {
+                      "tag": "literal",
+                      "span": {
+                        "start": 0,
+                        "end": 7,
+                        "line": 1,
+                        "column": 1,
+                        "end_line": 1,
+                        "end_column": 8,
+                        "source_id": "typed-payload-fixture"
+                      },
+                      "origin": null,
+                      "kind": "string",
+                      "lexeme": "'東京 🦑'"
+                    },
+                    {
+                      "tag": "name",
+                      "span": {
+                        "start": 0,
+                        "end": 7,
+                        "line": 1,
+                        "column": 1,
+                        "end_line": 1,
+                        "end_column": 8,
+                        "source_id": "typed-payload-fixture"
+                      },
+                      "origin": null,
+                      "name": "value"
+                    },
+                    {
+                      "tag": "literal",
+                      "span": {
+                        "start": 0,
+                        "end": 7,
+                        "line": 1,
+                        "column": 1,
+                        "end_line": 1,
+                        "end_column": 8,
+                        "source_id": "typed-payload-fixture"
+                      },
+                      "origin": null,
+                      "kind": "format",
+                      "lexeme": "z8.2"
+                    }
+                  ]
+                }
+              },
+              "display_text": "payload",
+              "span": {
+                "start": 0,
+                "end": 7,
+                "line": 1,
+                "column": 1,
+                "end_line": 1,
+                "end_column": 8,
+                "source_id": "typed-payload-fixture"
+              },
+              "origin": null,
+              "apply_references": []
+            }
+          }
+        },
+        "display_text": "payload",
+        "span": {
+          "start": 0,
+          "end": 7,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 8,
+          "source_id": "typed-payload-fixture"
+        },
+        "origin": null,
+        "apply_references": []
+      },
+      {
+        "kind": "ELSE",
+        "payload": {
+          "tag": "else",
+          "action": {
+            "tag": "deferred",
+            "error_kind": "unsupported_inline_action",
+            "native_cause": "unsupported inline action: opaque action",
+            "where_syntax_summary": "saved action summary",
+            "span": {
+              "start": 0,
+              "end": 7,
+              "line": 1,
+              "column": 1,
+              "end_line": 1,
+              "end_column": 8,
+              "source_id": "typed-payload-fixture"
+            },
+            "display_text": "opaque action"
+          }
+        },
+        "display_text": "payload",
+        "span": {
+          "start": 0,
+          "end": 7,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 8,
+          "source_id": "typed-payload-fixture"
+        },
+        "origin": null,
+        "apply_references": []
+      },
+      {
+        "kind": "ELSE",
+        "payload": {
+          "tag": "else",
+          "action": null
+        },
+        "display_text": "payload",
+        "span": {
+          "start": 0,
+          "end": 7,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 8,
+          "source_id": "typed-payload-fixture"
+        },
+        "origin": null,
+        "apply_references": []
+      },
+      {
+        "kind": "DO",
+        "payload": {
+          "tag": "do",
+          "loop_var": "index",
+          "start": {
+            "tag": "binary",
+            "span": {
+              "start": 0,
+              "end": 7,
+              "line": 1,
+              "column": 1,
+              "end_line": 1,
+              "end_column": 8,
+              "source_id": "typed-payload-fixture"
+            },
+            "origin": null,
+            "operator": "**",
+            "left": {
+              "tag": "name",
+              "span": {
+                "start": 0,
+                "end": 7,
+                "line": 1,
+                "column": 1,
+                "end_line": 1,
+                "end_column": 8,
+                "source_id": "typed-payload-fixture"
+              },
+              "origin": null,
+              "name": "value"
+            },
+            "right": {
+              "tag": "binary",
+              "span": {
+                "start": 0,
+                "end": 7,
+                "line": 1,
+                "column": 1,
+                "end_line": 1,
+                "end_column": 8,
+                "source_id": "typed-payload-fixture"
+              },
+              "origin": null,
+              "operator": "**",
+              "left": {
+                "tag": "literal",
+                "span": {
+                  "start": 0,
+                  "end": 7,
+                  "line": 1,
+                  "column": 1,
+                  "end_line": 1,
+                  "end_column": 8,
+                  "source_id": "typed-payload-fixture"
+                },
+                "origin": {
+                  "start": 0,
+                  "end": 8,
+                  "line": 1,
+                  "column": 1,
+                  "end_line": 1,
+                  "end_column": 9,
+                  "source_id": "typed-origin"
+                },
+                "kind": "numeric",
+                "lexeme": "9223372036854775808"
+              },
+              "right": {
+                "tag": "literal",
+                "span": {
+                  "start": 0,
+                  "end": 7,
+                  "line": 1,
+                  "column": 1,
+                  "end_line": 1,
+                  "end_column": 8,
+                  "source_id": "typed-payload-fixture"
+                },
+                "origin": null,
+                "kind": "missing",
+                "lexeme": "."
+              }
+            }
+          },
+          "end": {
+            "tag": "literal",
+            "span": {
+              "start": 0,
+              "end": 7,
+              "line": 1,
+              "column": 1,
+              "end_line": 1,
+              "end_column": 8,
+              "source_id": "typed-payload-fixture"
+            },
+            "origin": {
+              "start": 0,
+              "end": 8,
+              "line": 1,
+              "column": 1,
+              "end_line": 1,
+              "end_column": 9,
+              "source_id": "typed-origin"
+            },
+            "kind": "numeric",
+            "lexeme": "9223372036854775808"
+          }
+        },
+        "display_text": "payload",
+        "span": {
+          "start": 0,
+          "end": 7,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 8,
+          "source_id": "typed-payload-fixture"
+        },
+        "origin": null,
+        "apply_references": []
+      },
+      {
+        "kind": "DO",
+        "payload": {
+          "tag": "do",
+          "loop_var": null,
+          "start": null,
+          "end": null
+        },
+        "display_text": "payload",
+        "span": {
+          "start": 0,
+          "end": 7,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 8,
+          "source_id": "typed-payload-fixture"
+        },
+        "origin": null,
+        "apply_references": []
+      },
+      {
+        "kind": "ARRAY",
+        "payload": {
+          "tag": "array",
+          "array_name": "items",
+          "variables": [
+            "first",
+            "second"
+          ],
+          "span": {
+            "start": 0,
+            "end": 7,
+            "line": 1,
+            "column": 1,
+            "end_line": 1,
+            "end_column": 8,
+            "source_id": "typed-payload-fixture"
+          },
+          "declared_size": 2,
+          "wildcard_size": false,
+          "character_array": true
+        },
+        "display_text": "payload",
+        "span": {
+          "start": 0,
+          "end": 7,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 8,
+          "source_id": "typed-payload-fixture"
+        },
+        "origin": null,
+        "apply_references": []
+      },
+      {
+        "kind": "END",
+        "payload": {
+          "tag": "end"
+        },
+        "display_text": "payload",
+        "span": {
+          "start": 0,
+          "end": 7,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 8,
+          "source_id": "typed-payload-fixture"
+        },
+        "origin": null,
+        "apply_references": []
+      },
+      {
+        "kind": "DELETE",
+        "payload": {
+          "tag": "delete"
+        },
+        "display_text": "payload",
+        "span": {
+          "start": 0,
+          "end": 7,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 8,
+          "source_id": "typed-payload-fixture"
+        },
+        "origin": null,
+        "apply_references": []
+      },
+      {
+        "kind": "STOP",
+        "payload": {
+          "tag": "stop"
+        },
+        "display_text": "payload",
+        "span": {
+          "start": 0,
+          "end": 7,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 8,
+          "source_id": "typed-payload-fixture"
+        },
+        "origin": null,
+        "apply_references": []
+      },
+      {
+        "kind": "RUN",
+        "payload": {
+          "tag": "run"
+        },
+        "display_text": "payload",
+        "span": {
+          "start": 0,
+          "end": 7,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 8,
+          "source_id": "typed-payload-fixture"
+        },
+        "origin": null,
+        "apply_references": []
+      },
+      {
+        "kind": "SKIPPED",
+        "payload": {
+          "tag": "skipped"
+        },
+        "display_text": "payload",
+        "span": {
+          "start": 0,
+          "end": 7,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 8,
+          "source_id": "typed-payload-fixture"
+        },
+        "origin": null,
+        "apply_references": []
+      }
+    ]
+  },
+  "invalid_cases": [
+    {
+      "name": "unsupported_version",
+      "reason": "version",
+      "path": "version",
+      "mutation": {
+        "operation": "replace",
+        "path": [
+          "version"
+        ],
+        "value": 2
+      }
+    },
+    {
+      "name": "missing_default_target",
+      "reason": "field",
+      "path": "program.default_target",
+      "mutation": {
+        "operation": "remove",
+        "path": [
+          "default_target"
+        ]
+      }
+    },
+    {
+      "name": "missing_output_option_field",
+      "reason": "field",
+      "path": "effective_output_options['WORK.EMPTY'].obs",
+      "mutation": {
+        "operation": "remove",
+        "path": [
+          "effective_output_options",
+          "WORK.EMPTY",
+          "obs"
+        ]
+      }
+    },
+    {
+      "name": "unknown_statement_tag",
+      "reason": "tag",
+      "path": "statements[0].payload.tag",
+      "mutation": {
+        "operation": "replace",
+        "path": [
+          "statements",
+          0,
+          "payload",
+          "tag"
+        ],
+        "value": "opaque"
+      }
+    },
+    {
+      "name": "wrong_boolean_field_type",
+      "reason": "field",
+      "path": "suppress_implicit_output",
+      "mutation": {
+        "operation": "replace",
+        "path": [
+          "suppress_implicit_output"
+        ],
+        "value": 0
+      }
+    },
+    {
+      "name": "extra_expression_field",
+      "reason": "field",
+      "path": "statements[4].payload.value.unexpected_display",
+      "mutation": {
+        "operation": "insert",
+        "path": [
+          "statements",
+          4,
+          "payload",
+          "value",
+          "unexpected_display"
+        ],
+        "value": "recovered from source"
+      }
+    },
+    {
+      "name": "missing_deferred_action_cause",
+      "reason": "field",
+      "path": "statements[15].payload.then_action.native_cause",
+      "mutation": {
+        "operation": "remove",
+        "path": [
+          "statements",
+          15,
+          "payload",
+          "then_action",
+          "native_cause"
+        ]
+      }
+    },
+    {
+      "name": "missing_deferred_action_span",
+      "reason": "field",
+      "path": "statements[15].payload.then_action.span",
+      "mutation": {
+        "operation": "remove",
+        "path": [
+          "statements",
+          15,
+          "payload",
+          "then_action",
+          "span"
+        ]
+      }
+    },
+    {
+      "name": "missing_output_reference_options",
+      "reason": "field",
+      "path": "statements[13].payload.targets[0].options",
+      "mutation": {
+        "operation": "remove",
+        "path": [
+          "statements",
+          13,
+          "payload",
+          "targets",
+          0,
+          "options"
+        ]
+      }
+    },
+    {
+      "name": "output_option_map_mismatch",
+      "reason": "field",
+      "path": "effective_output_options",
+      "mutation": {
+        "operation": "remove",
+        "path": [
+          "effective_output_options",
+          "WORK.EMPTY"
+        ]
+      }
+    },
+    {
+      "name": "duplicate_normalized_option_map_key",
+      "reason": "field",
+      "path": "effective_output_options['work.empty']",
+      "mutation": {
+        "operation": "insert",
+        "path": [
+          "effective_output_options",
+          "work.empty"
+        ],
+        "value": {
+          "in_var": null,
+          "keep_vars": [],
+          "drop_vars": [],
+          "where_expr": null,
+          "rename_map": {},
+          "firstobs": null,
+          "obs": null
+        }
+      }
+    },
+    {
+      "name": "null_span_source_id",
+      "reason": "field",
+      "path": "statements[0].span.source_id",
+      "mutation": {
+        "operation": "replace",
+        "path": [
+          "statements",
+          0,
+          "span",
+          "source_id"
+        ],
+        "value": null
+      }
+    }
+  ]
+}

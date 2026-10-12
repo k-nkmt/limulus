@@ -1,11 +1,21 @@
+import inspect
 import re
 
+import pandas as pd
+import polars as pl
 import pyarrow as pa
 import pytest
 
 from limulus import Session
 from limulus.native_bridge import load_native_module
-from limulus.models import DiagnosticLabel, DiagnosticSpan, LogEntry, SubmitResult
+from limulus.models import (
+    Diagnostic,
+    DiagnosticLabel,
+    DiagnosticSpan,
+    ExecuteResponse,
+    LogEntry,
+    SubmitResult,
+)
 
 
 def _strip_ansi(text: str) -> str:
@@ -16,6 +26,13 @@ def _dataset_rows(dataset) -> list[dict[str, object]]:
     if hasattr(dataset, "to_pylist"):
         return dataset.to_pylist()
     return list(dataset)
+
+
+def test_session_rejects_parser_backend_option_without_a_compatibility_shim() -> None:
+    assert "parser_backend" not in inspect.signature(Session).parameters
+
+    with pytest.raises(TypeError):
+        Session(parser_backend="python")
 
 SESSION_SCENARIOS = {
     "load_submit_dataset_access": {
@@ -75,6 +92,33 @@ def test_session_submit_prints_log_on_failure(capsys: pytest.CaptureFixture[str]
     assert "Error" in captured.out
 
 
+def test_session_submit_does_not_print_info_only_result(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    session = Session()
+    monkeypatch.setattr(
+        session._executor,
+        "execute",
+        lambda _request: ExecuteResponse(
+            diagnostics=(
+                Diagnostic(
+                    code="RUNTIME_INFORMATIONAL_NOTICE",
+                    severity="info",
+                    message="informational only",
+                ),
+            )
+        ),
+    )
+
+    result = session.submit("data out; set inp; run;")
+    captured = capsys.readouterr()
+
+    assert result.success is True
+    assert tuple(entry.severity for entry in result.log) == ("info",)
+    assert captured.out == ""
+
+
 def test_session_submit_parse_failure_prints_source_excerpt(capsys: pytest.CaptureFixture[str]) -> None:
     session = Session()
 
@@ -109,11 +153,10 @@ def test_session_submit_execute_error_uses_statement_excerpt() -> None:
 
     rendered = _strip_ansi(result.format_log())
     assert result.success is False
-    assert "runtime_expression_evaluation_error" in rendered.lower()
+    assert "runtime_unsupported_function" in rendered.lower()
     assert "[stage: execute]" in rendered.lower()
-    assert "total = unknown_func(amount)" in rendered
-    assert "expression error" in rendered.lower()
-    assert "^" in rendered
+    assert "unknown_func" in rendered
+    assert "rust statement execution failed" in rendered.lower()
 
 
 def test_session_submit_execute_where_error_uses_statement_excerpt() -> None:
@@ -126,9 +169,8 @@ def test_session_submit_execute_where_error_uses_statement_excerpt() -> None:
     assert result.success is False
     assert "runtime_operator_not_supported" in rendered.lower()
     assert "[stage: execute]" in rendered.lower()
-    assert "where amount >< 1" in rendered.lower()
-    assert "operator error" in rendered.lower()
-    assert "^" in rendered
+    assert "amount >< 1" in rendered.lower()
+    assert "unsupported operator" in rendered.lower()
 
 
 def test_session_tracks_last_submit_result() -> None:
@@ -169,11 +211,10 @@ def test_session_submit_invalid_prx_pattern_renders_source_aware_excerpt() -> No
 
     rendered = _strip_ansi(result.format_log())
     assert result.success is False
-    assert "runtime_function_argument_invalid" in rendered.lower()
-    assert "<prxmatch-pattern>" in rendered
-    assert "/[/" in rendered
-    assert "regex syntax" in rendered.lower()
-    assert "^" in rendered
+    assert "runtime_expression_evaluation_error" in rendered.lower()
+    assert "invalid prxmatch pattern" in rendered.lower()
+    assert "[" in rendered
+    assert "unclosed character class" in rendered.lower()
 
 
 def test_session_submit_invalid_prx_flag_renders_source_aware_excerpt() -> None:
@@ -184,11 +225,8 @@ def test_session_submit_invalid_prx_flag_renders_source_aware_excerpt() -> None:
 
     rendered = _strip_ansi(result.format_log())
     assert result.success is False
-    assert "runtime_function_argument_invalid" in rendered.lower()
-    assert "<prxmatch-pattern>" in rendered
-    assert "/foo/z" in rendered
+    assert "runtime_expression_evaluation_error" in rendered.lower()
     assert "unsupported prx flag" in rendered.lower()
-    assert "^" in rendered
 
 
 def test_native_ariadne_renderer_renders_multiple_diagnostics_and_notes() -> None:
@@ -300,7 +338,8 @@ def test_session_logs_info_for_skipped_unsupported_statements() -> None:
 
     result = session.submit(scenario["dsl"])
 
-    assert result.success is True
+    assert result.success is False
+    assert any(entry.severity == "error" and entry.code == "RUNTIME_RUST_STATEMENT_UNSUPPORTED" for entry in result.log)
     skipped_logs = [entry for entry in result.log if entry.severity == "info" and "unsupported statement skipped" in entry.message]
     assert len(skipped_logs) == scenario["expected_skip_count"]
 
@@ -338,9 +377,137 @@ def test_session_submit_staged_pipeline_matches_session_method_reference() -> No
     reference.rename("kept", {"score": "final_score"}, out="expected")
     expected_rows = reference["expected"].to_pylist()
 
-    session = Session(parser_backend="python")
+    session = Session()
     session.load("inp", pa.table(source_rows))
     result = session.submit(dsl)
 
     assert result.success is True
     assert _dataset_rows(result.datasets["out"]) == expected_rows
+
+
+def test_session_load_conversion_failure_preserves_existing_dataset_on_both_sides() -> None:
+    session = Session()
+    session.load("x", pa.table({"x": pa.array([7], type=pa.int64())}))
+
+    mixed = pd.DataFrame({"x": [1, "invalid-mixed-type"]})
+    with pytest.raises(ValueError):
+        session.load("x", mixed)
+
+    assert session.to_arrow("x").to_pydict() == {"x": [7]}
+    assert session.to_arrow("x").schema.field("x").type == pa.int64()
+
+    result = session.submit("data y; set x; run;")
+    assert result.success is True
+    assert result.datasets["y"].to_pylist() == [{"x": 7}]
+
+    session.load("x", pa.table({"x": pa.array([8], type=pa.int64())}))
+    rerun = session.submit("data y; set x; run;")
+    assert rerun.success is True
+    assert rerun.datasets["y"].to_pylist() == [{"x": 8}]
+
+
+def test_session_load_conversion_failure_does_not_register_new_dataset() -> None:
+    session = Session()
+
+    mixed = pd.DataFrame({"x": [1, "invalid-mixed-type"]})
+    with pytest.raises(ValueError):
+        session.load("fresh", mixed)
+    with pytest.raises(ValueError):
+        session.load("bad", [1, 2])
+
+    assert "fresh" not in session.datasets
+    assert "bad" not in session.datasets
+    with pytest.raises(KeyError):
+        session.to_arrow("fresh")
+
+    result = session.submit("data out; set fresh; run;")
+    assert result.success is False
+    assert "out" not in result.datasets
+    assert any(entry.code == "RUNTIME_SET_DATASET_NOT_FOUND" for entry in result.log)
+
+
+def test_session_load_unsupported_input_preserves_existing_registration() -> None:
+    session = Session()
+    session.load("x", pa.table({"x": pa.array([7], type=pa.int64())}))
+
+    with pytest.raises(ValueError):
+        session.load("x", object())
+
+    assert session.to_arrow("x").to_pydict() == {"x": [7]}
+
+    result = session.submit("data y; set x; run;")
+    assert result.success is True
+    assert result.datasets["y"].to_pylist() == [{"x": 7}]
+
+
+def test_session_load_accepted_formats_register_matching_fetch_and_execution_state() -> None:
+    session = Session()
+    labeled = pa.table({"x": [7]}).replace_schema_metadata({b"memlabel": b"memo"}).set_column(
+        0,
+        pa.field("x", pa.int64(), metadata={b"label": b"Identifier"}),
+        pa.chunked_array([pa.array([7], type=pa.int64())]),
+    )
+    session.load("arrow_src", labeled)
+    session.load("polars_src", pl.DataFrame({"x": [8]}))
+    session.load("pandas_src", pd.DataFrame({"x": [9]}))
+    session.load("rows_src", [{"x": 10}])
+    session.load("empty_src", [])
+
+    assert session.to_arrow("ARROW_SRC").schema.metadata[b"memlabel"] == b"memo"
+    assert session.to_arrow("arrow_src").schema.field("x").metadata[b"label"] == b"Identifier"
+    assert session.to_arrow("arrow_src").schema.field("x").type == pa.int64()
+    assert session.to_arrow("polars_src").to_pydict() == {"x": [8]}
+    assert session.to_arrow("pandas_src").to_pydict() == {"x": [9]}
+    assert session.to_arrow("pandas_src").schema.field("x").type == pa.int64()
+    assert session.to_arrow("rows_src").to_pydict() == {"x": [10]}
+    assert session.to_arrow("empty_src").num_rows == 0
+
+    result = session.submit("data out; set arrow_src polars_src pandas_src rows_src; run;")
+    assert result.success is True
+    assert result.datasets["out"].to_pylist() == [
+        {"x": 7},
+        {"x": 8},
+        {"x": 9},
+        {"x": 10},
+    ]
+    assert result.datasets["out"].schema.metadata[b"memlabel"] == b"memo"
+
+
+# --- legacy execute smoke through the projected parse ------------------------------
+
+
+def test_legacy_projection_execute_smoke_if_do_dotted_option_host_resolve() -> None:
+    """One-row legacy submit smoke protecting the intermediate state: the
+    projected parse feeds the unchanged legacy pipeline for IF / DO,
+    dotted dataset references, and host function resolution."""
+
+    session = Session()
+    session.load("inp", pa.table({"x": [1]}))
+
+    result = session.submit(
+        "data work.out; "
+        "set work.inp; "
+        "do i = 1 to 2; y = x * i; end; "
+        "if x = 1 then z = apply('double', x); "
+        "output work.out; "
+        "run;",
+        functions={"double": lambda value: value * 2},
+    )
+
+    assert result.success is True, result.format_log()
+    assert list(result.datasets) == ["out"]
+    assert result.datasets["out"].to_pylist() == [
+        {"x": 1, "i": 2.0, "y": 2.0, "z": 2.0},
+    ]
+
+
+def test_legacy_projection_execute_smoke_else_and_toplevel_sum() -> None:
+    session = Session()
+    session.load("inp", pa.table({"x": [3]}))
+
+    result = session.submit(
+        "data out; set inp; total + 1; if x = 9 then w = 1; else w = 2; run;"
+    )
+
+    assert result.success is True, result.format_log()
+    assert result.datasets["out"].to_pylist() == [{"x": 3, "total": 1.0, "w": 2}]

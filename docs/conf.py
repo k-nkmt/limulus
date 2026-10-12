@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.abspath(".."))
 project = "limulus"
 copyright = "2026, k-nkmt"
 author = "k-nkmt"
-release = "0.5.0"
+release = "0.6.0"
 
 extensions = [
     "myst_nb",
@@ -16,7 +16,6 @@ extensions = [
     "sphinx.ext.napoleon",
     "sphinx_autodoc_typehints",
     "sphinx.ext.viewcode",
-    "sphinx.ext.intersphinx",
 ]
 
 source_suffix = {
@@ -48,20 +47,11 @@ myst_enable_extensions = [
 
 nb_execution_mode = "off"
 
-intersphinx_mapping = {
-    "python": ("https://docs.python.org/3", None),
-    "pyarrow": ("https://arrow.apache.org/docs/", None),
-}
-
 autodoc_default_options = {
     "undoc-members": False,
     "show-inheritance": True,
 }
 autodoc_mock_imports = [
-    "pyarrow",
-    "pyarrow.compute",
-    "pyarrow.ipc",
-    "pyarrow.parquet",
     "polars",
     "pandas",
     "limulus_native",

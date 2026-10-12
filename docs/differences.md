@@ -23,8 +23,15 @@ If you need to work with sas7bdat files, use pandas or other libraries to load t
 | `bool` | Numeric (0/1) | `bool` |
 | `date`, etc. | Numeric | `datetime` |
 
-Arrow supports a wide variety of data types.  
-Complex types such as structs that do not exist in SAS are not expected to be used in logic, but can be retained as columns without issue.
+Unchanged integer and temporal columns retain their Arrow values and types.
+List and struct columns can be passed through, but cannot be used in expressions,
+`BY`, `WHERE`, or `apply(...)`.
+
+## Unicode Strings
+
+String functions now support Unicode text, not just ASCII. Standard functions such
+as `substr`, `length`, and `index` use character positions and lengths rather than
+bytes, similar to K functions such as `ksubstr`.
 
 ---
 
@@ -69,8 +76,12 @@ Current transpose scope is intentionally narrow:
 For `assign()`, string values are interpreted as expressions. To assign a string literal, quote it inside the expression, for example `flag="'A'"`.
 
 `assign()` is now executed through a column-oriented expression pipeline. The current release guarantees column-oriented execution for literals, arithmetic / comparison expressions, `case when`, and the built-in functions.
+
+`assign()` preserves unchanged columns and their metadata; replaced and new
+columns use the computed values and types.
+
 ### PUT / INPUT Scope
-limulus now provides a limited `put(...)` / `input(...)` helper surface in both helper expressions and the Python runtime.
+limulus now provides a limited `put(...)` / `input(...)` helper surface in helper expressions and the Rust row runtime.
 
 Current built-in families are:
 
@@ -81,10 +92,7 @@ Current built-in families are:
 
 `input(...)` returns Python / Arrow-compatible numeric, `date`, `datetime`, and `time` values rather than date/time numeric values. This is intentionally a practical subset, not a full format catalog.
 
-`Session.register_format(...)` and `Session.register_informat(...)` now support two extension styles:
-
-- exact-match dict catalogs, which are serializable and can stay on the Rust-first DATA step path when the rest of the workload is eligible
-- callable hooks, which remain Python-side extension points
+`Session.register_format(...)` and `Session.register_informat(...)` accept exact-match dict catalogs only. The catalogs are serializable and cross the Rust bridge; callable formatter/parser hooks are unsupported.
 
 For dict catalogs, `put(...)` returns text and falls back to the original value on no-match, while `input(...)` returns `null` on no-match. Character custom formats use `$name.` in DATA step syntax but register as `name` plus `namespace="character"` in Python. Dict custom `input(...)` is intentionally float64-only in this phase; broader typed custom informat support is deferred.
 
@@ -112,11 +120,16 @@ Pre-sorting is not required to use BY groups.
 ### Missing Values
 SAS language numeric missing values use the special `.` symbol, but limulus treats them as `null` (Arrow).  
 SAS language character missing values are `""`, but in limulus, following the Arrow specification, `""` and `null` are treated as distinct values.  
-Use `missing()` to check for both `""` and `null` together.  
+Use `missing()` or `cmiss()` to check for both `""` and `null` together.
 Assign `null` using `=.` for numeric types, or `=None` for both numeric and character types. (Support for `call missing` is also under consideration.)
 
+Arithmetic propagates `null`.
+
 ### Data Joining
-Merge operates like SQL; if there are duplicate column names, an error is raised.
+Unlike SAS, duplicate non-`BY` column names raise an error instead of being
+overwritten. Repeated BY values across multiple inputs produce a warning.
+Merge keys must have matching types, except that mixed Arrow `string` and
+`large_string` keys are promoted to `large_string`.
 
 ### Array
 Both numeric and character types can be included in the same array without issues.
@@ -141,7 +154,10 @@ run;
 |---|---|
 |`=` | `==`|
 |`^=` |`!=`|
-|`\|\|`| `+`| 
+
+
+Data Step expressions support string concatenation with `+` and `||`;
+see [Syntax Reference](syntax.md).
 
 ### Custom Functions
 
@@ -162,7 +178,7 @@ Useful for extending functionality not covered by limulus's built-in functions, 
 | SAS language Feature | Notes |
 |---------|------|
 | Attrib | Full ATTRIB parity is not implemented yet; use dataset labels and LABEL statements for supported metadata cases |
-| Format (`FORMAT`, `INFORMAT`) | Exact-match dict catalogs and Python callable registry hooks are available; SAS `FORMAT` / `INFORMAT` statements are not implemented |
+| Format (`FORMAT`, `INFORMAT`) | Exact-match dict catalogs are available; callable formatter/parser registration and SAS `FORMAT` / `INFORMAT` statements are not implemented |
 | Macro variables (`%let`, `&var`) | `%let` / `%put` / `%macro ... %mend` are skipped, not executed; `&var` expansion is not implemented |
 | PROC statements | `proc ... run;` / `proc ... quit;` blocks are skipped so surrounding DATA steps can still be parsed, but procedure semantics are not implemented |
 | `INFILE` / `FILE` | Not planned; handle on the Python side |

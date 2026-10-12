@@ -25,7 +25,7 @@ pip install limulus
 
 ### 1. データの用意
 
-csvから読み込むなど、DataFrame(arrow/poloarss/pandas) を用意します。
+csvから読み込むなど、DataFrame(arrow/polars/pandas) を用意します。
 
 ```python
 import pandas as pd

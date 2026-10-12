@@ -3,8 +3,8 @@
 drop_table_stmt: DROP TABLE sql_name
 sql_name: NAME (DOT NAME)*
 
-DROP.5: /[dD][rR][oO][pP]/
-TABLE.5: /[tT][aA][bB][lL][eE]/
+DROP.5: /(?ai:drop)/
+TABLE.5: /(?ai:table)/
 NAME.4: /[A-Za-z_][\w]*/
 DOT: "."
 

@@ -6,7 +6,7 @@ import ast
 from dataclasses import dataclass
 import math
 import re
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from lark import Tree
@@ -15,15 +15,14 @@ import pyarrow as pa
 import polars as pl
 
 from .naming import _column_key
+from .expression_semantics import ExpressionSemantics
 from .format_registry import FormatRegistry
 from .lark_support import build_lark_parser_from_file
 from .models import Diagnostic, DiagnosticLabel, DiagnosticSpan, RenderRequest
 from .renderer import render_diagnostics
-from .runtime.expressions import ExpressionEvaluator
-from .runtime.row_runtime import RowRuntimeService
 
 
-_ASSIGNMENT_NORMALIZER = ExpressionEvaluator(lambda: {})
+_EXPRESSION_SEMANTICS = ExpressionSemantics()
 _UNSUPPORTED = object()
 _ASSIGN_FUNCTION_REGISTRY = {
     "upcase",
@@ -81,7 +80,7 @@ class _CaseWhenParseError(ValueError):
 class _CaseWhenParser:
     def __init__(self) -> None:
         self._parser = build_lark_parser_from_file("case_when.lark")
-        self._expression_evaluator = ExpressionEvaluator(lambda: {})
+        self._expression_semantics = ExpressionSemantics()
 
     def parse(self, expression: str) -> tuple[tuple[_CaseWhenClause, ...], str | None] | None:
         if not expression.strip().lower().startswith("case"):
@@ -198,7 +197,7 @@ class _CaseWhenParser:
                 )
             )
 
-        normalized = self._expression_evaluator.prepare_expression(expression_text)
+        normalized = self._expression_semantics.prepare_expression(expression_text)
         try:
             compile(normalized, "<limulus-scalar>", "eval")
         except Exception as error:
@@ -498,14 +497,60 @@ def assign_columns(
     frame = pl.from_arrow(table)
     current_columns = tuple(frame.columns)
     registry = format_registry or _DEFAULT_FORMAT_REGISTRY
+    changed_target_names: list[str] = []
 
     for spec in specs:
         target_name = _resolve_assignment_target_name(current_columns, spec.target)
         expression = _build_assignment_expression(spec, column_names=current_columns, format_registry=registry)
         frame = frame.with_columns(expression.alias(target_name))
         current_columns = tuple(frame.columns)
+        changed_target_names.append(target_name)
 
-    return finalize_table(table, frame.to_arrow())
+    finalized = finalize_table(table, frame.to_arrow())
+    return _assemble_assign_result(source=table, finalized=finalized, changed_target_names=changed_target_names)
+
+
+def _assemble_assign_result(
+    *,
+    source: pa.Table,
+    finalized: pa.Table,
+    changed_target_names: Sequence[str],
+) -> pa.Table:
+    """Builds the assign output from original source columns and computed results.
+
+    Unchanged source columns reuse the original ``ChunkedArray`` and ``Field``
+    (including nested child field metadata); changed and new columns use the
+    finalized calculation result. Selection is by exact column name against
+    the resolved actual target names tracked during sequential assignment.
+    Column order follows the finalized schema, and a row-count mismatch fails
+    before any publication boundary.
+    """
+
+    if finalized.num_rows != source.num_rows:
+        raise ValueError(
+            f"Assignment result row count mismatch: {finalized.num_rows} rows != {source.num_rows} source rows"
+        )
+
+    changed_names = set(changed_target_names)
+    source_columns_by_name: dict[str, tuple[pa.ChunkedArray, pa.Field]] = {}
+    for index, field in enumerate(source.schema):
+        source_columns_by_name.setdefault(field.name, (source.column(index), field))
+
+    arrays: list[pa.ChunkedArray] = []
+    fields: list[pa.Field] = []
+    for index, field in enumerate(finalized.schema):
+        source_entry = source_columns_by_name.get(field.name)
+        if source_entry is not None and field.name not in changed_names:
+            arrays.append(source_entry[0])
+            fields.append(source_entry[1])
+        else:
+            arrays.append(finalized.column(index))
+            fields.append(field)
+
+    return pa.Table.from_arrays(
+        arrays,
+        schema=pa.schema(fields, metadata=finalized.schema.metadata),
+    )
 
 
 def _build_assignment_expression(
@@ -567,14 +612,14 @@ def _translate_expression_to_polars(
     column_names: Sequence[str],
     format_registry: FormatRegistry,
 ) -> pl.Expr:
-    unsupported_function = _find_unsupported_function(
+    unsupported_function = _EXPRESSION_SEMANTICS.find_unsupported_function(
         expression,
         supported_functions=_supported_assign_function_names(),
     )
     if unsupported_function is not None:
         raise ValueError(f"Unsupported function: {unsupported_function}")
 
-    normalized = _ASSIGNMENT_NORMALIZER.prepare_expression(expression)
+    normalized = _EXPRESSION_SEMANTICS.prepare_expression(expression)
     try:
         parsed = ast.parse(normalized, mode="eval")
     except SyntaxError as error:
@@ -1057,79 +1102,6 @@ def _decimal_places_from_unit(unit: float) -> int | None:
     return None
 
 
-def _evaluate_assignment_spec(
-    spec: _AssignmentSpec,
-    *,
-    row: Mapping[str, Any],
-    evaluator: ExpressionEvaluator,
-    runtime: RowRuntimeService,
-    context: Any,
-) -> Any:
-    if spec.kind == "literal":
-        return spec.value
-
-    if spec.kind in {"expr", "func"}:
-        return _evaluate_expression_value(
-            spec.expression or "",
-            row=row,
-            evaluator=evaluator,
-            runtime=runtime,
-            context=context,
-        )
-
-    if spec.kind == "case_when":
-        for clause in spec.clauses:
-            matched = _evaluate_expression_value(
-                clause.condition,
-                row=row,
-                evaluator=evaluator,
-                runtime=runtime,
-                context=context,
-            )
-            if bool(matched):
-                return _evaluate_expression_value(
-                    clause.value_expression,
-                    row=row,
-                    evaluator=evaluator,
-                    runtime=runtime,
-                    context=context,
-                )
-
-        if spec.else_expression is None:
-            return None
-
-        return _evaluate_expression_value(
-            spec.else_expression,
-            row=row,
-            evaluator=evaluator,
-            runtime=runtime,
-            context=context,
-        )
-
-    raise ValueError(f"Unsupported assignment kind: {spec.kind}")
-
-
-def _evaluate_expression_value(
-    expression: str,
-    *,
-    row: Mapping[str, Any],
-    evaluator: ExpressionEvaluator,
-    runtime: RowRuntimeService,
-    context: Any,
-) -> Any:
-    unsupported_function = _find_unsupported_function(
-        expression,
-        supported_functions=runtime.get_eval_scope().keys(),
-    )
-    if unsupported_function is not None:
-        raise ValueError(f"Unsupported function: {unsupported_function}")
-
-    value, diagnostic = evaluator.evaluate_scalar(expression, row=row, context=context, array_defs={})
-    if diagnostic is not None:
-        raise ValueError(diagnostic.message)
-    return value
-
-
 def _normalize_assignments(assignments: Mapping[str, Any]) -> tuple[_AssignmentSpec, ...]:
     normalized: list[_AssignmentSpec] = []
     for target, value in assignments.items():
@@ -1154,54 +1126,13 @@ def _normalize_assignments(assignments: Mapping[str, Any]) -> tuple[_AssignmentS
                 )
                 continue
 
-            kind = "func" if _contains_function_call(value) else "expr"
+            kind = "func" if _EXPRESSION_SEMANTICS.contains_function_call(value) else "expr"
             normalized.append(_AssignmentSpec(target=target, kind=kind, expression=value))
             continue
 
         normalized.append(_AssignmentSpec(target=target, kind="literal", value=value))
 
     return tuple(normalized)
-
-
-def _contains_function_call(expression: str) -> bool:
-    parsed = _parse_assignment_expression_ast(expression)
-    if parsed is None:
-        return False
-    return any(isinstance(node, ast.Call) and isinstance(node.func, ast.Name) for node in ast.walk(parsed))
-
-
-def _find_unsupported_function(
-    expression: str,
-    *,
-    supported_functions: Iterable[str],
-) -> str | None:
-    supported = {_column_key(name) for name in supported_functions}
-    for function_name in _iter_assignment_function_names(expression):
-        normalized = _column_key(function_name)
-        if normalized in {_column_key(keyword) for keyword in {"and", "or", "not", "in"}}:
-            continue
-        if normalized not in supported:
-            return function_name
-    return None
-
-
-def _parse_assignment_expression_ast(expression: str) -> ast.AST | None:
-    normalized = _ASSIGNMENT_NORMALIZER.prepare_expression(expression)
-    try:
-        return ast.parse(normalized, mode="eval")
-    except SyntaxError:
-        return None
-
-
-def _iter_assignment_function_names(expression: str) -> tuple[str, ...]:
-    parsed = _parse_assignment_expression_ast(expression)
-    if parsed is None:
-        return ()
-    return tuple(
-        node.func.id
-        for node in ast.walk(parsed)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-    )
 
 
 def _group_rows(

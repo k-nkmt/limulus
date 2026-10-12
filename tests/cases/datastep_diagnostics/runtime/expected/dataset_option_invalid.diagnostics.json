@@ -1,13 +1,24 @@
 {
   "diagnostics": [
     {
-      "stage": "execute",
-      "code": "RUNTIME_DATASET_OPTION_INVALID",
+      "stage": "parse",
+      "code": "PARSE_DATASET_WHERE_UNSUPPORTED",
       "severity": "error",
+      "location": "statement:2",
       "message_fragments": [
-        "Dataset option WHERE= evaluation failed",
-        "invalid syntax"
-      ]
+        "dataset option WHERE= is invalid",
+        "incomplete WHERE= comparison operand"
+      ],
+      "span": {
+        "line": 2,
+        "column": 3
+      },
+      "labels": [
+        {
+          "kind": "primary"
+        }
+      ],
+      "source_text": "id >"
     }
   ]
 }

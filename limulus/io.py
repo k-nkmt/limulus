@@ -204,36 +204,21 @@ class ExecutorIOService:
                 message=f"Output conversion failed for '{dataset_name}': {error}",
             )
 
-    def resolve_inputs(
+    def resolve_input_names(
         self,
         *,
-        ast_statements: Sequence[Any],
+        source_input_names: Sequence[str],
         explicit_inputs: Mapping[str, DataSetRef],
         available_inputs: Mapping[str, DataSetRef] | None,
         registered_tables: Mapping[str, DataSetRef],
         synthetic_inputs: Mapping[str, DataSetRef] | None = None,
     ) -> tuple[dict[str, DataSetRef], list[Diagnostic]]:
+        """Resolve structured source names using the shared catalog order."""
+
         resolved_inputs = dict(explicit_inputs)
         diagnostics: list[Diagnostic] = []
         available = available_inputs or {}
         synthetic = synthetic_inputs or {}
-
-        source_statement = next(
-            (
-                statement
-                for statement in ast_statements
-                if statement.kind in {"SET", "MERGE"}
-            ),
-            None,
-        )
-        if source_statement is None:
-            return resolved_inputs, diagnostics
-
-        source_input_names = [ref.name for ref in source_statement.dataset_refs]
-        if not source_input_names:
-            source_tokens = source_statement.text.split()
-            if len(source_tokens) >= 2:
-                source_input_names = [source_tokens[1]]
 
         for input_name in source_input_names:
             explicit_match = self.resolve_dataset_alias(resolved_inputs, input_name)
@@ -280,6 +265,16 @@ class ExecutorIOService:
         visible_inputs.update(explicit_inputs)
         if available_inputs:
             visible_inputs.update(available_inputs)
+        # The registry keys datasets canonically while generated/available keys
+        # preserve the user-written spelling, so the merge above can hold two
+        # spellings of the same dataset key. Collapse to one canonical entry
+        # with last-wins semantics, mirroring the registry's replace-on-register
+        # contract and the existing merge order (registered -> explicit ->
+        # available; the last source in the merge wins).
+        canonical_inputs: dict[str, DataSetRef] = {}
+        for name, dataset_ref in visible_inputs.items():
+            canonical_inputs[self.dataset_name_key(name)] = dataset_ref
+        visible_inputs = canonical_inputs
 
         resolved: dict[str, DataSetRef] = {}
         for requested_name in requested_names:
@@ -447,51 +442,6 @@ class ExecutorIOService:
             message=f"Unsupported format: {input_ref.kind}",
         )
 
-    def iterate_input_rows(self, input_ref: DataSetRef) -> tuple[Iterable[dict[str, Any]], Diagnostic | None]:
-        normalized_kind = input_ref.kind.strip().lower()
-
-        if normalized_kind == "memory":
-            payload = input_ref.payload
-            if payload is None:
-                return (), None
-            if isinstance(payload, Sequence) and not isinstance(payload, (str, bytes, bytearray)):
-                if all(isinstance(item, Mapping) for item in payload):
-                    return (dict(item) if not isinstance(item, dict) else item for item in payload), None
-                return (), Diagnostic(
-                    code="IO_MEMORY_INPUT_ERROR",
-                    severity="error",
-                    message="memory input payload must be a sequence of mappings.",
-                )
-            return (), Diagnostic(
-                code="IO_MEMORY_INPUT_ERROR",
-                severity="error",
-                message="memory input payload must be a sequence of mappings.",
-            )
-
-        if normalized_kind == "arrow_table":
-            payload = input_ref.payload
-            if isinstance(payload, Sequence) and not isinstance(payload, (str, bytes, bytearray)):
-                if all(isinstance(item, Mapping) for item in payload):
-                    return (dict(item) if not isinstance(item, dict) else item for item in payload), None
-                return (), Diagnostic(
-                    code="IO_INPUT_ERROR",
-                    severity="error",
-                    message="arrow_table sequence payload must be a sequence of mappings.",
-                )
-
-            if hasattr(payload, "to_batches"):
-                def _iter_arrow_batches() -> Iterable[dict[str, Any]]:
-                    for batch in payload.to_batches(max_chunksize=4096):
-                        for row in batch.to_pylist():
-                            yield row
-
-                return _iter_arrow_batches(), None
-
-        rows, load_error = self.load_input_rows(input_ref)
-        if load_error is not None:
-            return (), load_error
-        return rows, None
-
     def resolve_output_targets(
         self,
         *,
@@ -524,9 +474,11 @@ class ExecutorIOService:
         for statement in ast_statements:
             if statement.kind != "OUTPUT":
                 continue
-            tokens = statement.text.split()
-            if len(tokens) > 1:
-                targets.append(self.normalize_dataset_name(tokens[1]))
+            targets.extend(
+                self.normalize_dataset_name(reference.name)
+                for reference in getattr(statement, "output_refs", ())
+                if getattr(reference, "name", "")
+            )
         return tuple(targets)
 
     def extract_data_targets(self, ast_statements: Sequence[Any]) -> tuple[str, ...]:
@@ -541,10 +493,7 @@ class ExecutorIOService:
         if dataset_refs:
             return tuple(self.normalize_dataset_name(ref.name) for ref in dataset_refs if getattr(ref, "name", ""))
 
-        tokens = statement.text.split()
-        if len(tokens) <= 1:
-            return ()
-        return tuple(self.normalize_dataset_name(token) for token in tokens[1:] if token)
+        return ()
 
     def merge_unique_targets(self, *target_groups: Sequence[str]) -> tuple[str, ...]:
         merged: list[str] = []
@@ -581,14 +530,3 @@ class ExecutorIOService:
             if self.dataset_name_key(candidate_name) == normalized_requested:
                 return dataset
         return None
-
-    def resolve_declared_output_target(
-        self,
-        requested_target: str,
-        declared_targets: Sequence[str],
-    ) -> str:
-        requested_key = self.dataset_name_key(requested_target)
-        for declared in declared_targets:
-            if self.dataset_name_key(declared) == requested_key:
-                return declared
-        return self.normalize_dataset_name(requested_target)

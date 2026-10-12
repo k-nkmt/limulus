@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import math
 import re
 from collections.abc import Mapping, Sequence
@@ -11,34 +10,19 @@ from typing import Any
 import pyarrow as pa
 
 from ..models import DataSetRef, Diagnostic
+from ..naming import _dataset_key
 from ..native_bridge import load_native_module
-from ..parser import ast_statements_to_dict
 from .contracts import (
-    MetricsAdapter,
     NATIVE_RUNTIME_MODULE_GROUP,
-    RustExecutionPayload,
-    STANDARD_SOURCE_ACCESS_MODE,
-    build_source_owner_evidence_contract,
-    canonicalize_compatibility_path_reason,
+    RuntimeExecutionResult,
+    TypedRustExecutionPayload,
     normalize_phase_metrics,
 )
 from .transport import _STANDARD_TRANSPORT_KIND
 
 
 class RustNativeBlockExecutor:
-    _POWER_PATTERN = re.compile(
-        r"(?P<base>[A-Za-z_][\w\.]*)\s*\*\*\s*(?P<exp>-?\d+(?:\.\d+)?)"
-    )
-    _MISSING_LITERAL_PATTERN = re.compile(r"(?<![\w])\.(?![\w])")
-    _ROUND_ASSIGN_PATTERN = re.compile(
-        r"^\s*([A-Za-z_][\w\.]*)\s*=\s*round\s*\(",
-        re.IGNORECASE,
-    )
     native_runtime_module_group = NATIVE_RUNTIME_MODULE_GROUP
-
-    def __init__(self) -> None:
-        self.last_phase_metrics: dict[str, float] = {}
-        self.last_source_owner_metadata: dict[str, Any] = {}
 
     @staticmethod
     def _normalize_diagnostic_code(code: str, message: str) -> str:
@@ -52,162 +36,274 @@ class RustNativeBlockExecutor:
 
     def execute_block(
         self,
-        payload: RustExecutionPayload,
-    ) -> tuple[dict[str, DataSetRef], list[Diagnostic]]:
-        self.last_phase_metrics = {}
-        self.last_source_owner_metadata = {}
-        normalize_round_outputs = self._requires_round_output_normalization(payload)
-        round_output_columns = self._collect_round_output_columns(payload) if normalize_round_outputs else set()
-        has_set_statement = any(getattr(statement, "kind", "") == "SET" for statement in payload.ast_statements)
-        if not has_set_statement:
-            return {}, [
-                Diagnostic(
-                    code="RUNTIME_RUST_STATEMENT_UNSUPPORTED",
-                    severity="error",
-                    location="statement:1",
-                    message="Rust native runtime does not support DATA step execution without SET.",
-                )
-            ]
+        payload: TypedRustExecutionPayload,
+    ) -> RuntimeExecutionResult:
+        """Call the public typed native entry and import its complete output set."""
+
+        if not isinstance(payload, TypedRustExecutionPayload):
+            raise TypeError("payload must be a TypedRustExecutionPayload")
+        if not payload.native_program_json:
+            return self._result(
+                outputs={},
+                diagnostics=(
+                    Diagnostic(
+                        code="RUNTIME_RUST_BRIDGE_PAYLOAD_BUILD_FAILED",
+                        severity="error",
+                        message="Typed native program JSON is required.",
+                    ),
+                ),
+            )
+        if not payload.input_streams:
+            return self._result(
+                outputs={},
+                diagnostics=(
+                    Diagnostic(
+                        code="RUNTIME_RUST_BRIDGE_ARROW_EXPORT_MISSING",
+                        severity="error",
+                        message="Rust native runtime requires Arrow C input streams.",
+                    ),
+                ),
+            )
+
+        raw_targets = payload.native_program.get("output_targets")
+        if not isinstance(raw_targets, Sequence) or isinstance(
+            raw_targets, (str, bytes, bytearray)
+        ):
+            return self._result(
+                outputs={},
+                diagnostics=(
+                    Diagnostic(
+                        code="RUNTIME_RUST_BRIDGE_PAYLOAD_BUILD_FAILED",
+                        severity="error",
+                        message="Typed native program output_targets must be a sequence.",
+                    ),
+                ),
+            )
+        expected_targets = tuple(str(target) for target in raw_targets)
 
         native_module, _import_error = load_native_module()
         if native_module is None:
-            return {}, [
-                Diagnostic(
-                    code="RUNTIME_BACKEND_CAPABILITY_MISSING",
-                    severity="error",
-                    message="Rust native runtime module is not available.",
-                )
-            ]
+            return self._result(
+                outputs={},
+                diagnostics=(
+                    Diagnostic(
+                        code="RUNTIME_BACKEND_CAPABILITY_MISSING",
+                        severity="error",
+                        message="Rust native runtime module is not available.",
+                    ),
+                ),
+            )
 
-        native_payload, serialization_error = self._serialize_payload(payload)
-        if serialization_error is not None:
-            return {}, [serialization_error]
-
+        native_payload: dict[str, Any] = {
+            "native_program_json": payload.native_program_json,
+            "input_streams": dict(payload.input_streams),
+            "execution_plan": payload.execution_plan,
+            "preparation_kind": payload.preparation_kind,
+            "apply_registry": dict(payload.apply_registry),
+            "format_catalog_payload": dict(payload.format_catalog_payload),
+        }
         try:
             native_result = native_module.execute_block(native_payload)
         except Exception as error:
-            return {}, [
-                Diagnostic(
-                    code="RUNTIME_RUST_NATIVE_EXECUTION_FAILED",
-                    severity="error",
-                    message=f"Rust native execute_block failed: {error}",
-                )
-            ]
+            return self._result(
+                outputs={},
+                diagnostics=(
+                    Diagnostic(
+                        code="RUNTIME_RUST_NATIVE_EXECUTION_FAILED",
+                        severity="error",
+                        message=f"Rust native execute_block failed: {error}",
+                    ),
+                ),
+                native_invoked=True,
+            )
 
         if not isinstance(native_result, Mapping):
-            return {}, [
-                Diagnostic(
-                    code="RUNTIME_RUST_NATIVE_EXECUTION_FAILED",
-                    severity="error",
-                    message="Rust native execute_block returned invalid result type.",
-                )
-            ]
+            return self._result(
+                outputs={},
+                diagnostics=(
+                    Diagnostic(
+                        code="RUNTIME_RUST_NATIVE_EXECUTION_FAILED",
+                        severity="error",
+                        message=(
+                            "Rust native execute_block returned invalid result type."
+                        ),
+                    ),
+                ),
+                native_invoked=True,
+            )
 
         diagnostics = self._deserialize_diagnostics(native_result.get("diagnostics"))
-        self.last_source_owner_metadata = self._deserialize_source_owner_metadata(
-            raw_result=native_result,
-            payload=payload,
-        )
+        phase_metrics = self._deserialize_phase_metrics(native_result.get("phase_metrics"))
         if diagnostics:
-            return {}, diagnostics
-        self.last_phase_metrics = self._deserialize_phase_metrics(native_result.get("phase_metrics"))
-
-        outputs: dict[str, DataSetRef] = {}
-        if payload.prepared_merge_mode:
-            raw_output_streams = native_result.get("output_streams")
-            if isinstance(raw_output_streams, Mapping):
-                for target, stream in raw_output_streams.items():
-                    target_name = str(target)
-                    try:
-                        importer = getattr(pa.RecordBatchReader, "_import_from_c_capsule", pa.RecordBatchReader._import_from_c)
-                        reader = importer(stream)
-                        table = reader.read_all()
-                        if normalize_round_outputs:
-                            table = self._normalize_float_artifacts(table, round_output_columns)
-                        table = self._restore_empty_output_schema(
-                            table=table,
-                            target_name=target_name,
-                            execution_plan=payload.execution_plan,
-                        )
-                    except Exception as error:
-                        return {}, [
-                            Diagnostic(
-                                code="RUNTIME_RUST_NATIVE_EXECUTION_FAILED",
-                                severity="error",
-                                location=f"dataset:{target_name}",
-                                message=f"Failed to import Arrow C stream for '{target_name}': {error}",
-                            )
-                        ]
-                    outputs[target_name] = DataSetRef(
-                        kind=_STANDARD_TRANSPORT_KIND,
-                        location=f"dataset://{target_name}",
-                        payload=table,
-                    )
-                return outputs, diagnostics
-
-        if payload.transport_mode == "diagnostic_memory_rows":
-            raw_output_streams = native_result.get("output_streams")
-            if isinstance(raw_output_streams, Mapping):
-                for target, stream in raw_output_streams.items():
-                    target_name = str(target)
-                    try:
-                        importer = getattr(pa.RecordBatchReader, "_import_from_c_capsule", pa.RecordBatchReader._import_from_c)
-                        reader = importer(stream)
-                        table = reader.read_all()
-                        if normalize_round_outputs:
-                            table = self._normalize_float_artifacts(table, round_output_columns)
-                        rows = table.to_pylist()
-                    except Exception as error:
-                        return {}, [
-                            Diagnostic(
-                                code="RUNTIME_RUST_NATIVE_EXECUTION_FAILED",
-                                severity="error",
-                                location=f"dataset:{target_name}",
-                                message=f"Failed to import Arrow C stream for '{target_name}': {error}",
-                            )
-                        ]
-                    sparse_rows = [
-                        {key: value for key, value in dict(row).items() if value is not None}
-                        for row in rows
-                        if isinstance(row, Mapping)
-                    ]
-                    outputs[target_name] = DataSetRef(
-                        kind="memory",
-                        location=f"dataset://{target_name}",
-                        payload=sparse_rows,
-                    )
-                return outputs, diagnostics
+            return self._result(
+                outputs={},
+                diagnostics=tuple(diagnostics),
+                native_invoked=True,
+                phase_metrics=phase_metrics,
+            )
 
         raw_output_streams = native_result.get("output_streams")
-        if isinstance(raw_output_streams, Mapping):
-            for target, stream in raw_output_streams.items():
-                target_name = str(target)
-                try:
-                    importer = getattr(pa.RecordBatchReader, "_import_from_c_capsule", pa.RecordBatchReader._import_from_c)
-                    reader = importer(stream)
-                    table = reader.read_all()
-                    table = self._restore_empty_output_schema(
-                        table=table,
-                        target_name=target_name,
-                        execution_plan=payload.execution_plan,
-                    )
-                except Exception as error:
-                    return {}, [
+        if not isinstance(raw_output_streams, Mapping):
+            detail = (
+                "missing"
+                if raw_output_streams is None
+                else f"invalid type {type(raw_output_streams).__name__}"
+            )
+            return self._result(
+                outputs={},
+                diagnostics=(
+                    Diagnostic(
+                        code="RUNTIME_RUST_NATIVE_EXECUTION_FAILED",
+                        severity="error",
+                        message=(
+                            "Rust native execute_block returned no valid Arrow "
+                            f"output_streams mapping ({detail})."
+                        ),
+                    ),
+                ),
+                native_invoked=True,
+                phase_metrics=phase_metrics,
+            )
+
+        expected_target_keys = tuple(_dataset_key(target) for target in expected_targets)
+        if len(set(expected_target_keys)) != len(expected_target_keys):
+            return self._result(
+                outputs={},
+                diagnostics=(
+                    Diagnostic(
+                        code="RUNTIME_RUST_NATIVE_EXECUTION_FAILED",
+                        severity="error",
+                        message="Typed execution payload contains duplicate output targets.",
+                    ),
+                ),
+                native_invoked=True,
+                phase_metrics=phase_metrics,
+            )
+        available_streams: dict[str, object] = {}
+        for target, stream in raw_output_streams.items():
+            target_key = _dataset_key(str(target))
+            if target_key in available_streams:
+                return self._result(
+                    outputs={},
+                    diagnostics=(
+                        Diagnostic(
+                            code="RUNTIME_RUST_NATIVE_EXECUTION_FAILED",
+                            severity="error",
+                            location=f"dataset:{target}",
+                            message=(
+                                "Rust native execute_block returned duplicate "
+                                "output targets."
+                            ),
+                        ),
+                    ),
+                    native_invoked=True,
+                    phase_metrics=phase_metrics,
+                )
+            available_streams[target_key] = stream
+
+        available_keys = set(available_streams)
+        expected_keys = set(expected_target_keys)
+        missing_targets = tuple(
+            target
+            for target, key in zip(expected_targets, expected_target_keys)
+            if key not in available_keys
+        )
+        if missing_targets:
+            target = missing_targets[0]
+            return self._result(
+                outputs={},
+                diagnostics=(
+                    Diagnostic(
+                        code="RUNTIME_RUST_NATIVE_EXECUTION_FAILED",
+                        severity="error",
+                        location=f"dataset:{target}",
+                        message=(
+                            "Rust native execute_block did not return the expected "
+                            f"Arrow output stream for target '{target}'."
+                        ),
+                    ),
+                ),
+                native_invoked=True,
+                phase_metrics=phase_metrics,
+            )
+        unexpected = available_keys - expected_keys
+        if unexpected:
+            target_key = sorted(unexpected)[0]
+            return self._result(
+                outputs={},
+                diagnostics=(
+                    Diagnostic(
+                        code="RUNTIME_RUST_NATIVE_EXECUTION_FAILED",
+                        severity="error",
+                        location=f"dataset:{target_key}",
+                        message=(
+                            "Rust native execute_block returned an unexpected "
+                            f"Arrow output stream for target '{target_key}'."
+                        ),
+                    ),
+                ),
+                native_invoked=True,
+                phase_metrics=phase_metrics,
+            )
+
+        outputs: dict[str, DataSetRef] = {}
+        for target_name, target_key in zip(expected_targets, expected_target_keys):
+            try:
+                importer = getattr(
+                    pa.RecordBatchReader,
+                    "_import_from_c_capsule",
+                    pa.RecordBatchReader._import_from_c,
+                )
+                reader = importer(available_streams[target_key])
+                table = reader.read_all()
+                table = self._restore_empty_output_schema(
+                    table=table,
+                    target_name=target_name,
+                    execution_plan=payload.execution_plan,
+                )
+            except Exception as error:
+                return self._result(
+                    outputs={},
+                    diagnostics=(
                         Diagnostic(
                             code="RUNTIME_RUST_NATIVE_EXECUTION_FAILED",
                             severity="error",
                             location=f"dataset:{target_name}",
-                            message=f"Failed to import Arrow C stream for '{target_name}': {error}",
-                        )
-                    ]
-                outputs[target_name] = DataSetRef(
-                    kind=_STANDARD_TRANSPORT_KIND,
-                    location=f"dataset://{target_name}",
-                    payload=table,
+                            message=(
+                                f"Failed to import Arrow C stream for '{target_name}': {error}"
+                            ),
+                        ),
+                    ),
+                    native_invoked=True,
+                    phase_metrics=phase_metrics,
                 )
-            return outputs, diagnostics
+            outputs[target_name] = DataSetRef(
+                kind=_STANDARD_TRANSPORT_KIND,
+                location=f"dataset://{target_name}",
+                payload=table,
+            )
+        return self._result(
+            outputs=outputs,
+            diagnostics=tuple(diagnostics),
+            native_invoked=True,
+            phase_metrics=phase_metrics,
+        )
 
-        return outputs, diagnostics
+    @staticmethod
+    def _result(
+        *,
+        outputs: Mapping[str, DataSetRef],
+        diagnostics: Sequence[Diagnostic],
+        native_invoked: bool = False,
+        phase_metrics: Mapping[str, float] | None = None,
+    ) -> RuntimeExecutionResult:
+        return RuntimeExecutionResult(
+            outputs=outputs,
+            diagnostics=tuple(diagnostics),
+            actual_engine="rust",
+            native_invoked=native_invoked,
+            phase_metrics=normalize_phase_metrics(phase_metrics),
+        )
 
     def _restore_empty_output_schema(
         self,
@@ -233,7 +329,12 @@ class RustNativeBlockExecutor:
         arrays: list[pa.Array] = []
         type_expectations = target_spec["type_expectations"]
         for column_name in projected_columns:
-            arrow_type = self._resolve_arrow_type_name(type_expectations.get(column_name))
+            try:
+                arrow_type = self._resolve_arrow_type_name(type_expectations.get(column_name))
+            except Exception as error:
+                raise ValueError(
+                    f"invalid Arrow type expectation for column '{column_name}': {error}"
+                ) from error
             arrays.append(pa.array([], type=arrow_type) if arrow_type is not None else pa.array([]))
         return pa.table(arrays, names=list(projected_columns))
 
@@ -266,6 +367,7 @@ class RustNativeBlockExecutor:
     def _resolve_arrow_type_name(self, type_name: str | None) -> pa.DataType | None:
         if not type_name or type_name == "dynamic":
             return None
+        type_name = str(type_name).strip()
         aliases: dict[str, pa.DataType] = {
             "int": pa.int64(),
             "float": pa.float64(),
@@ -275,6 +377,26 @@ class RustNativeBlockExecutor:
         }
         if type_name in aliases:
             return aliases[type_name]
+
+        timestamp_match = re.fullmatch(
+            r"timestamp\[(s|ms|us|ns)(?:,\s*tz=(.+))?\]",
+            type_name,
+        )
+        if timestamp_match is not None:
+            unit = timestamp_match.group(1)
+            timezone = timestamp_match.group(2)
+            if timezone is not None and not timezone:
+                raise ValueError("timestamp timezone must not be empty")
+            return pa.timestamp(unit, tz=timezone)
+        if type_name.startswith("timestamp["):
+            raise ValueError(f"invalid timestamp type expectation: {type_name}")
+
+        time_match = re.fullmatch(r"time64\[(us|ns)\]", type_name)
+        if time_match is not None:
+            return pa.time64(time_match.group(1))
+        if type_name.startswith("time64["):
+            raise ValueError(f"invalid time64 type expectation: {type_name}")
+
         decimal_match = re.fullmatch(r"decimal128\((\d+),\s*(-?\d+)\)", type_name.strip().lower())
         if decimal_match is not None:
             return pa.decimal128(int(decimal_match.group(1)), int(decimal_match.group(2)))
@@ -283,77 +405,6 @@ class RustNativeBlockExecutor:
         except Exception:
             return None
 
-    def _requires_round_output_normalization(self, payload: RustExecutionPayload) -> bool:
-        for statement in payload.ast_statements:
-            statement_text = getattr(statement, "text", "")
-            if isinstance(statement_text, str) and "round(" in statement_text.lower():
-                return True
-        return False
-
-    def _collect_round_output_columns(self, payload: RustExecutionPayload) -> set[str]:
-        columns: set[str] = set()
-        for statement in payload.ast_statements:
-            if getattr(statement, "kind", "") != "ASSIGN":
-                continue
-            statement_text = getattr(statement, "text", "")
-            if not isinstance(statement_text, str):
-                continue
-            matched = self._ROUND_ASSIGN_PATTERN.match(statement_text)
-            if matched is None:
-                continue
-            columns.add(matched.group(1))
-        return columns
-
-    def _normalize_float_artifacts(self, table: pa.Table, target_columns: set[str]) -> pa.Table:
-        if not target_columns:
-            return table
-
-        rebuilt_columns: list[pa.Array] = []
-        needs_rebuild = False
-
-        for field, column in zip(table.schema, table.columns):
-            if field.name not in target_columns:
-                rebuilt_columns.append(column.combine_chunks())
-                continue
-            if not (pa.types.is_float32(field.type) or pa.types.is_float64(field.type)):
-                rebuilt_columns.append(column.combine_chunks())
-                continue
-
-            values = column.to_pylist()
-            normalized_values: list[float | None] = []
-            field_changed = False
-            for value in values:
-                if value is None:
-                    normalized_values.append(None)
-                    continue
-                if not isinstance(value, float) or not math.isfinite(value):
-                    normalized_values.append(value)
-                    continue
-
-                normalized = value
-                tolerance = 1e-12 * max(1.0, abs(value))
-                for places in range(13):
-                    rounded = round(value, places)
-                    if abs(value - rounded) <= tolerance:
-                        normalized = rounded
-                        break
-
-                if normalized == -0.0:
-                    normalized = 0.0
-                if normalized != value:
-                    field_changed = True
-                normalized_values.append(normalized)
-
-            if field_changed:
-                needs_rebuild = True
-                rebuilt_columns.append(pa.array(normalized_values, type=field.type))
-            else:
-                rebuilt_columns.append(column.combine_chunks())
-
-        if not needs_rebuild:
-            return table
-        return pa.table(rebuilt_columns, names=table.column_names)
-
     def _deserialize_phase_metrics(self, raw_metrics: Any) -> dict[str, float]:
         metrics = normalize_phase_metrics(raw_metrics, include_legacy_aliases=True)
         return {
@@ -361,128 +412,6 @@ class RustNativeBlockExecutor:
             for key, value in metrics.items()
             if isinstance(value, (int, float)) and math.isfinite(float(value))
         }
-
-    def _deserialize_source_owner_metadata(
-        self,
-        *,
-        raw_result: Mapping[str, Any],
-        payload: RustExecutionPayload,
-    ) -> dict[str, Any]:
-        return MetricsAdapter.source_owner_metadata(
-            raw_metadata=raw_result,
-            source_access_mode=payload.source_access_mode,
-            compatibility_path_reason=payload.compatibility_path_reason,
-            phase_metrics=raw_result.get("phase_metrics"),
-            prepared_merge_mode=payload.prepared_merge_mode,
-            transport_mode=payload.transport_mode,
-        )
-
-    def _serialize_payload(
-        self,
-        payload: RustExecutionPayload,
-    ) -> tuple[dict[str, Any], Diagnostic | None]:
-        ast_payload = ast_statements_to_dict(tuple(payload.ast_statements))
-        self._normalize_power_operator_for_rust(ast_payload)
-        try:
-            ast_json = json.dumps(ast_payload, ensure_ascii=False)
-        except Exception as error:
-            return {}, Diagnostic(
-                code="RUNTIME_RUST_AST_SERIALIZE_FAILED",
-                severity="error",
-                message=f"Failed to serialize AST for Rust runtime: {error}",
-            )
-
-        statements: list[dict[str, Any]] = []
-        for statement in payload.ast_statements:
-            statement_kind = getattr(statement, "kind", "")
-            statement_text = getattr(statement, "text", "")
-            if statement_kind == "ASSIGN":
-                statement_text = self._normalize_assign_expression_for_rust(statement_text)
-            statements.append(
-                {
-                    "kind": statement_kind,
-                    "text": statement_text,
-                }
-            )
-
-        if not payload.input_streams and payload.transport_mode != "diagnostic_memory_rows":
-            return {}, Diagnostic(
-                code="RUNTIME_RUST_BRIDGE_ARROW_EXPORT_MISSING",
-                severity="error",
-                message="Rust native runtime requires Arrow C input streams or prepared merge memory inputs.",
-            )
-
-        compatibility_path_reason = canonicalize_compatibility_path_reason(
-            payload.compatibility_path_reason,
-            prepared_merge_mode=payload.prepared_merge_mode,
-            transport_mode=payload.transport_mode,
-        )
-        source_owner_evidence = build_source_owner_evidence_contract(
-            source_access_mode=payload.source_access_mode,
-            compatibility_path_reason=compatibility_path_reason,
-            phase_metrics={},
-        )
-        serialized = {
-            "ast": ast_payload,
-            "ast_json": ast_json,
-            "statements": statements,
-            "output_targets": list(payload.output_targets),
-            "input_streams": dict(payload.input_streams),
-            "execution_plan": payload.execution_plan,
-            "row_loop_plan": payload.row_loop_plan,
-            "source_access_mode": source_owner_evidence.source_access_mode,
-            "compatibility_path_reason": source_owner_evidence.compatibility_path_reason,
-            "transport_mode": payload.transport_mode,
-            "builder_mode": payload.builder_mode,
-            "rewrite_metadata": payload.rewrite_metadata,
-            "python_limited_mode": payload.python_limited_mode,
-        }
-        if payload.apply_registry:
-            serialized["apply_registry"] = dict(payload.apply_registry)
-        if payload.format_catalog_payload:
-            serialized["format_catalog_payload"] = dict(payload.format_catalog_payload)
-        if payload.prepared_merge_mode:
-            serialized["prepared_merge_mode"] = True
-        if payload.transport_mode == "diagnostic_memory_rows" and payload.legacy_inputs:
-            serialized["inputs"] = dict(payload.legacy_inputs)
-
-        return serialized, None
-
-    def _normalize_power_operator_for_rust(self, ast_payload: dict[str, Any]) -> None:
-        statements = ast_payload.get("statements")
-        if not isinstance(statements, list):
-            return
-        for item in statements:
-            if not isinstance(item, dict):
-                continue
-            if item.get("kind") != "ASSIGN":
-                continue
-            text = item.get("text")
-            if not isinstance(text, str):
-                continue
-            item["text"] = self._normalize_assign_expression_for_rust(text)
-
-    def _normalize_assign_expression_for_rust(self, text: str) -> str:
-        return self._rewrite_missing_literal_in_assign(self._rewrite_power_expression_in_assign(text))
-
-    def _rewrite_power_expression_in_assign(self, text: str) -> str:
-        if "**" not in text or "=" not in text:
-            return text
-        left, right = text.split("=", 1)
-        rewritten = right
-        while True:
-            updated = self._POWER_PATTERN.sub(r"pow(\g<base>, \g<exp>)", rewritten)
-            if updated == rewritten:
-                break
-            rewritten = updated
-        return f"{left.strip()} = {rewritten.strip()}"
-
-    def _rewrite_missing_literal_in_assign(self, text: str) -> str:
-        if "." not in text or "=" not in text:
-            return text
-        left, right = text.split("=", 1)
-        rewritten = self._MISSING_LITERAL_PATTERN.sub("None", right)
-        return f"{left.strip()} = {rewritten.strip()}"
 
     def _deserialize_diagnostics(self, value: Any) -> list[Diagnostic]:
         if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):

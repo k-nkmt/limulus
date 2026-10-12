@@ -1,3 +1,0 @@
-data out(keep=id name drop=name rename=(id=subject_id));
-  set inp;
-run;

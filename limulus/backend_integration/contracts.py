@@ -1,12 +1,19 @@
-"""Contracts shared across backend selection, Rust handoff, and phase metrics."""
+"""Contracts shared across strategy decisions, Rust handoff, and phase metrics."""
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from types import MappingProxyType
+from typing import Any, Literal, Protocol, runtime_checkable
 
-from ..models import DataSetRef, Diagnostic, ExecuteRequest
+from ..models import (
+    DataSetRef,
+    Diagnostic,
+    ExecuteRequest,
+    PreparationKind,
+)
+from ..syntax.models import BlockSyntax, DatasetOptionSyntax, SourceDocument
 
 
 NATIVE_RUNTIME_MODULE_GROUP = (
@@ -18,14 +25,6 @@ NATIVE_RUNTIME_MODULE_GROUP = (
     "output",
 )
 
-STANDARD_SOURCE_ACCESS_MODE = "borrowed_arrow_view"
-CANONICAL_COMPATIBILITY_PATH_REASONS = (
-    "end_var_survivor_count_materialization",
-    "dataset_option_materialization",
-    "output_dataset_option_materialization",
-    "unplanned_output_handoff",
-    "legacy_output_materialization",
-)
 PHASE_METRIC_NAMES = (
     "source_access_ms",
     "row_execution_ms",
@@ -34,99 +33,139 @@ PHASE_METRIC_NAMES = (
 LEGACY_PHASE_METRIC_ALIASES = {
     "input_import_ms": "source_access_ms",
 }
-LEGACY_OUTPUT_MATERIALIZATION_REASON = "legacy_output_materialization"
+
+
+@runtime_checkable
+class TypedOutputPlan(Protocol):
+    """Settled output facts supplied by the execution output-plan owner."""
+
+    @property
+    def targets(self) -> tuple[str, ...]: ...
+
+    @property
+    def default_target(self) -> str | None: ...
+
+    @property
+    def suppress_implicit_output(self) -> bool: ...
+
+    @property
+    def effective_output_options(self) -> Mapping[str, DatasetOptionSyntax]: ...
+
+    @property
+    def diagnostics(self) -> tuple[Diagnostic, ...]: ...
 
 
 @dataclass(frozen=True)
-class RuntimeExecutionContext:
+class TypedRustExecutionContext:
+    """Pure syntax and resolved runtime facts for the internal typed bridge."""
+
+    source: SourceDocument
+    block: BlockSyntax
     request: ExecuteRequest
-    ast_statements: Sequence[Any]
     resolved_inputs: Mapping[str, DataSetRef]
-    resolved_output_targets: tuple[str, ...]
-    execution_plan: Any | None = None
-    transport_mode: str = "standard_arrow_stream"
-    builder_mode: str | None = None
-    rewrite_metadata: Any | None = None
-    python_limited_mode: bool = False
-
-
-@dataclass(frozen=True)
-class RustExecutionPayload:
-    ast_statements: Sequence[Any]
-    output_targets: tuple[str, ...]
-    input_streams: Mapping[str, Any]
-    legacy_inputs: Mapping[str, Any] = None
-    apply_registry: Mapping[str, Any] = None
-    format_catalog_payload: Mapping[str, Any] = None
-    prepared_merge_mode: bool = False
-    function_registry_keys: tuple[str, ...] = ()
-    execution_plan: Any | None = None
-    row_loop_plan: Any | None = None
-    source_access_mode: str = STANDARD_SOURCE_ACCESS_MODE
-    compatibility_path_reason: str | None = None
-    transport_mode: str = "standard_arrow_stream"
-    builder_mode: str | None = None
-    rewrite_metadata: Any | None = None
-    python_limited_mode: bool = False
+    preparation_kind: PreparationKind
+    output_plan: TypedOutputPlan
+    execution_plan: Mapping[str, Any] | None = None
+    execution_readiness: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
-        if self.legacy_inputs is None:
-            object.__setattr__(self, "legacy_inputs", {})
+        if not isinstance(self.source, SourceDocument):
+            raise TypeError("source must be a SourceDocument")
+        if not isinstance(self.block, BlockSyntax):
+            raise TypeError("block must be a BlockSyntax")
+        if not isinstance(self.request, ExecuteRequest):
+            raise TypeError("request must be an ExecuteRequest")
+        if not isinstance(self.resolved_inputs, Mapping):
+            raise TypeError("resolved_inputs must be a mapping")
+        if not all(
+            isinstance(name, str) and isinstance(reference, DataSetRef)
+            for name, reference in self.resolved_inputs.items()
+        ):
+            raise TypeError("resolved_inputs must map names to DataSetRef values")
+        if self.preparation_kind not in {"none", "prepared_set", "prepared_merge"}:
+            raise ValueError(
+                f"unsupported preparation kind: {self.preparation_kind!r}"
+            )
+        if not isinstance(self.output_plan, TypedOutputPlan):
+            raise TypeError("output_plan must provide the typed output-plan contract")
+        if self.block.span.source_id != self.source.source_id:
+            raise ValueError("block and source document ids must match")
+        if self.block.span.start < 0 or self.block.span.end > len(self.source.text):
+            raise ValueError("block span is outside the source document")
+        object.__setattr__(
+            self,
+            "resolved_inputs",
+            MappingProxyType(dict(self.resolved_inputs)),
+        )
+        if self.execution_plan is not None:
+            if not isinstance(self.execution_plan, Mapping):
+                raise TypeError("execution_plan must be a mapping or None")
+            object.__setattr__(
+                self,
+                "execution_plan",
+                MappingProxyType(dict(self.execution_plan)),
+            )
+        if self.execution_readiness is not None:
+            if not isinstance(self.execution_readiness, Mapping):
+                raise TypeError("execution_readiness must be a mapping or None")
+            object.__setattr__(
+                self,
+                "execution_readiness",
+                MappingProxyType(dict(self.execution_readiness)),
+            )
+
+
+@dataclass(frozen=True)
+class TypedRustExecutionPayload:
+    """Typed native program, Arrow streams, and resolved execution facts."""
+
+    native_program: Mapping[str, Any]
+    input_streams: Mapping[str, Any]
+    native_program_json: str = ""
+    preparation_kind: PreparationKind = "none"
+    apply_registry: Mapping[str, Any] = field(default_factory=dict)
+    format_catalog_payload: Mapping[str, Any] = field(default_factory=dict)
+    execution_plan: Mapping[str, Any] | None = None
+
+    def __post_init__(self) -> None:
+        if self.preparation_kind not in {"none", "prepared_set", "prepared_merge"}:
+            raise ValueError(
+                f"unsupported preparation kind: {self.preparation_kind!r}"
+            )
         if self.apply_registry is None:
             object.__setattr__(self, "apply_registry", {})
         if self.format_catalog_payload is None:
             object.__setattr__(self, "format_catalog_payload", {})
-
-
-RuntimeExecuteFn = Callable[[RuntimeExecutionContext], tuple[dict[str, DataSetRef], list[Diagnostic]]]
+        if self.execution_plan is not None and not isinstance(
+            self.execution_plan, Mapping
+        ):
+            raise TypeError("execution_plan must be a mapping or None")
 
 
 @dataclass(frozen=True)
-class SourceOwnerEvidenceContract:
-    source_access_mode: str = STANDARD_SOURCE_ACCESS_MODE
-    compatibility_path_reason: str | None = None
-    phase_metrics: Mapping[str, float] = field(default_factory=dict)
+class RuntimeExecutionResult:
+    """Typed result envelope returned by the Rust runtime adapter.
 
-    @property
-    def path_classification(self) -> str:
-        return classify_source_access_path(
-            source_access_mode=self.source_access_mode,
-            compatibility_path_reason=self.compatibility_path_reason,
+    Runtime observations travel with the execution result instead of being
+    read from adapter-owned side channels by the coordinator.
+    """
+
+    outputs: Mapping[str, DataSetRef]
+    diagnostics: tuple[Diagnostic, ...]
+    actual_engine: Literal["rust"]
+    native_invoked: bool
+    phase_metrics: Mapping[str, float]
+
+    def __post_init__(self) -> None:
+        if self.actual_engine != "rust":
+            raise ValueError("actual_engine must be 'rust'")
+        if not isinstance(self.diagnostics, tuple):
+            object.__setattr__(self, "diagnostics", tuple(self.diagnostics))
+        object.__setattr__(
+            self,
+            "phase_metrics",
+            normalize_phase_metrics(self.phase_metrics),
         )
-
-
-def normalize_compatibility_path_reason(reason: Any) -> str | None:
-    if isinstance(reason, str) and reason in CANONICAL_COMPATIBILITY_PATH_REASONS:
-        return reason
-    return None
-
-
-def canonicalize_compatibility_path_reason(
-    reason: Any,
-    *,
-    prepared_merge_mode: bool = False,
-    transport_mode: str | None = None,
-) -> str | None:
-    if prepared_merge_mode or transport_mode == "diagnostic_memory_rows":
-        return LEGACY_OUTPUT_MATERIALIZATION_REASON
-    return normalize_compatibility_path_reason(reason)
-
-
-def normalize_source_access_mode(
-    source_access_mode: Any,
-    compatibility_path_reason: Any,
-) -> str:
-    return STANDARD_SOURCE_ACCESS_MODE
-
-
-def classify_source_access_path(
-    *,
-    source_access_mode: Any,
-    compatibility_path_reason: Any,
-) -> str:
-    if normalize_compatibility_path_reason(compatibility_path_reason) is not None:
-        return "unsupported_cleanup_path"
-    return "standard_success_path"
 
 
 def normalize_phase_metrics(
@@ -158,72 +197,11 @@ def normalize_phase_metrics(
     return metrics
 
 
-def build_source_owner_evidence_contract(
-    *,
-    source_access_mode: Any,
-    compatibility_path_reason: Any,
-    phase_metrics: Any,
-) -> SourceOwnerEvidenceContract:
-    normalized_reason = normalize_compatibility_path_reason(compatibility_path_reason)
-    normalized_mode = normalize_source_access_mode(
-        source_access_mode=source_access_mode,
-        compatibility_path_reason=normalized_reason,
-    )
-    return SourceOwnerEvidenceContract(
-        source_access_mode=normalized_mode,
-        compatibility_path_reason=normalized_reason,
-        phase_metrics=normalize_phase_metrics(phase_metrics),
-    )
-
-
-class MetricsAdapter:
-    @staticmethod
-    def source_owner_metadata(
-        *,
-        raw_metadata: Any = None,
-        source_access_mode: Any = STANDARD_SOURCE_ACCESS_MODE,
-        compatibility_path_reason: Any = None,
-        phase_metrics: Any = None,
-        prepared_merge_mode: bool = False,
-        transport_mode: str | None = None,
-    ) -> dict[str, Any]:
-        metadata = raw_metadata if isinstance(raw_metadata, Mapping) else {}
-        raw_reason = metadata.get("compatibility_path_reason", compatibility_path_reason)
-        normalized_reason = canonicalize_compatibility_path_reason(
-            raw_reason,
-            prepared_merge_mode=prepared_merge_mode,
-            transport_mode=transport_mode,
-        )
-        raw_phase_metrics = phase_metrics if phase_metrics is not None else metadata.get("phase_metrics")
-        evidence = build_source_owner_evidence_contract(
-            source_access_mode=metadata.get("source_access_mode", source_access_mode),
-            compatibility_path_reason=normalized_reason,
-            phase_metrics=raw_phase_metrics,
-        )
-        return {
-            "source_access_mode": evidence.source_access_mode,
-            "compatibility_path_reason": evidence.compatibility_path_reason,
-            "path_classification": evidence.path_classification,
-            "phase_metrics": dict(evidence.phase_metrics),
-        }
-
-
 __all__ = [
-    "CANONICAL_COMPATIBILITY_PATH_REASONS",
-    "LEGACY_OUTPUT_MATERIALIZATION_REASON",
     "LEGACY_PHASE_METRIC_ALIASES",
-    "MetricsAdapter",
     "NATIVE_RUNTIME_MODULE_GROUP",
     "PHASE_METRIC_NAMES",
-    "RuntimeExecuteFn",
-    "RuntimeExecutionContext",
-    "RustExecutionPayload",
-    "STANDARD_SOURCE_ACCESS_MODE",
-    "SourceOwnerEvidenceContract",
-    "build_source_owner_evidence_contract",
-    "canonicalize_compatibility_path_reason",
-    "classify_source_access_path",
-    "normalize_compatibility_path_reason",
+    "PreparationKind",
+    "RuntimeExecutionResult",
     "normalize_phase_metrics",
-    "normalize_source_access_mode",
 ]

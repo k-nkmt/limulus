@@ -14,8 +14,8 @@ expression: expression_atom+
                 | LBRACK expression? RBRACK
                 | LBRACE expression? RBRACE
 
-DO.5: /[dD][oO]/
-TO.5: /[tT][oO]/
+DO.5: /(?ai:do)/
+TO.5: /(?ai:to)/
 LOOP_VAR.4: /[A-Za-z_][\w\.]*/
 NAME.1: /[A-Za-z_][\w\.]*/
 EQUALS: "="

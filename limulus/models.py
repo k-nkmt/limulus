@@ -2,9 +2,79 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, MutableMapping
 from dataclasses import dataclass, field
-from typing import Any
+from types import MappingProxyType
+from typing import Any, Callable, Literal
 
 from .naming import _dataset_key
+
+
+ApplyCallable = Callable[..., object]
+
+
+def _immutable_callable_mapping(mapping: Mapping[str, ApplyCallable]) -> Mapping[str, ApplyCallable]:
+    """Create a shallow, callable-only immutable mapping snapshot.
+
+    ``HostFunctionContext`` deliberately stores values rather than frame or
+    mapping objects.  The host-functions service performs request validation
+    and fail-closed diagnostics before constructing the context; this helper
+    keeps direct construction safe as well by discarding non-callable entries.
+    """
+
+    if not isinstance(mapping, Mapping):
+        raise TypeError("host function context mappings must be mappings")
+    return MappingProxyType(
+        {
+            key: value
+            for key, value in mapping.items()
+            if isinstance(key, str) and callable(value)
+        }
+    )
+
+
+@dataclass(frozen=True)
+class HostFunctionContext:
+    """Immutable request-scoped callable snapshots for ``apply`` resolution.
+
+    The context contains no frame reference and no mutable registry.  Each
+    mapping is copied on construction and exposed through ``MappingProxyType``;
+    callers may therefore reuse or mutate their source dictionaries without
+    changing an already-created request context.
+    """
+
+    explicit: Mapping[str, ApplyCallable] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
+    caller_locals: Mapping[str, ApplyCallable] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
+    caller_globals: Mapping[str, ApplyCallable] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
+
+    def __post_init__(self) -> None:
+        for name in ("explicit", "caller_locals", "caller_globals"):
+            object.__setattr__(self, name, _immutable_callable_mapping(getattr(self, name)))
+
+
+PreparationKind = Literal["none", "prepared_set", "prepared_merge"]
+
+
+@dataclass(frozen=True)
+class PreparationProvenance:
+    """Typed provenance carried separately from ``location``/payload.
+
+    Prepared kind and case-preserving internal variable names travel here, so
+    ``DataSetRef.location`` stays opaque user-supplied text and consumers never
+    need to parse markers out of it.
+    """
+
+    kind: PreparationKind = "none"
+    internal_variable_names: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.kind not in {"none", "prepared_set", "prepared_merge"}:
+            raise ValueError(f"unsupported preparation kind: {self.kind!r}")
+        object.__setattr__(self, "internal_variable_names", tuple(self.internal_variable_names))
 
 
 @dataclass(frozen=True)
@@ -13,6 +83,70 @@ class DataSetRef:
     location: str
     payload: Any | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    preparation: PreparationProvenance = field(default_factory=PreparationProvenance)
+
+
+@dataclass(frozen=True)
+class SourceMetadataSnapshot:
+    """Lightweight source metadata captured before SET/MERGE collapse.
+
+    The snapshot intentionally stores only an Arrow schema and the
+    ``DataSetRef.metadata`` mapping.  It never owns a table, row buffer, or
+    Python row list, so preserving lineage cannot change the transport
+    contract or duplicate execution data.
+    """
+
+    source_ordinal: int
+    source_name: str
+    schema: Any
+    dataset_ref_metadata: Mapping[str, object] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.source_ordinal < 0:
+            raise ValueError("source_ordinal must be non-negative")
+        if not isinstance(self.dataset_ref_metadata, Mapping):
+            raise TypeError("dataset_ref_metadata must be a mapping")
+        object.__setattr__(
+            self,
+            "dataset_ref_metadata",
+            MappingProxyType(dict(self.dataset_ref_metadata)),
+        )
+
+
+@dataclass(frozen=True)
+class SourceMetadataLineage:
+    """Ordered metadata snapshots for DSL source occurrences."""
+
+    ordered_sources: tuple[SourceMetadataSnapshot, ...] = field(default_factory=tuple)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "ordered_sources", tuple(self.ordered_sources))
+
+
+@dataclass(frozen=True)
+class NormalizedExecutionInputs:
+    """Request-scoped Arrow inputs and the public presentation preference.
+
+    ``inputs`` is the carrier used by preparation and the Rust bridge.  The
+    presentation flag is deliberately kept outside that mapping so a public
+    memory representation cannot change the native transport contract.
+    """
+
+    inputs: Mapping[str, DataSetRef] = field(default_factory=dict)
+    preserve_memory_presentation: bool = False
+
+
+@dataclass(frozen=True)
+class PreparedExecutionInputs:
+    """Preparation result carried from shared input processing to handoff."""
+
+    inputs: Mapping[str, DataSetRef] = field(default_factory=dict)
+    preparation_kind: PreparationKind = "none"
+    source_metadata_lineage: SourceMetadataLineage = field(default_factory=SourceMetadataLineage)
+
+    def __post_init__(self) -> None:
+        if self.preparation_kind not in {"none", "prepared_set", "prepared_merge"}:
+            raise ValueError(f"unsupported preparation kind: {self.preparation_kind!r}")
 
 
 @dataclass(frozen=True)
@@ -60,6 +194,8 @@ class ExecuteRequest:
     inputs: Mapping[str, DataSetRef] = field(default_factory=dict)
     output_targets: tuple[str, ...] = field(default_factory=tuple)
     options: Mapping[str, Any] = field(default_factory=dict)
+    host_function_context: HostFunctionContext = field(default_factory=HostFunctionContext)
+    runtime_backend: str | None = None
 
 
 @dataclass(frozen=True)
@@ -222,10 +358,17 @@ class DatasetCatalog(Mapping[str, Any]):
 
 
 __all__ = [
+    "ApplyCallable",
     "DataSetRef",
+    "PreparationKind",
+    "SourceMetadataSnapshot",
+    "SourceMetadataLineage",
+    "NormalizedExecutionInputs",
+    "PreparedExecutionInputs",
     "DiagnosticSpan",
     "DiagnosticLabel",
     "Diagnostic",
+    "HostFunctionContext",
     "ExecuteRequest",
     "ExecuteResponse",
     "OutputConversionResult",

@@ -1,40 +1,97 @@
 use chrono::{Datelike, Timelike};
 use crate::expressions::ScalarValue;
+use crate::row_view::LogicalRowAccess;
 use crate::runtime::EvalRuntimeState;
 use crate::value_ref::OwnedValue;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 // State setter utilities - internal helpers for managing runtime state
-pub(crate) fn set_automatic_scalar(state: &mut EvalRuntimeState, name: &str, value: ScalarValue) {
+pub(crate) fn set_automatic_scalar(
+    state: &mut EvalRuntimeState,
+    name: &str,
+    value: ScalarValue,
+) -> Result<(), String> {
+    let normalized_name = crate::expressions::column_key(name);
+    let owned_value = OwnedValue::from(value);
+    if let Some(view) = state.logical_row.as_mut() {
+        view.set_automatic_value(&normalized_name, owned_value.clone())
+            .map_err(|error| error.to_string())?;
+    }
     state
         .automatic_values
-        .insert(crate::expressions::column_key(name), OwnedValue::from(value));
+        .insert(normalized_name.clone(), owned_value.clone());
+    Ok(())
 }
 
-pub(crate) fn set_mutable_scalar(state: &mut EvalRuntimeState, name: &str, value: ScalarValue) {
+pub(crate) fn set_mutable_scalar(
+    state: &mut EvalRuntimeState,
+    name: &str,
+    value: ScalarValue,
+) -> Result<(), String> {
+    let normalized_name = crate::expressions::column_key(name);
+    let owned_value = OwnedValue::from(value);
+    if let Some(view) = state.logical_row.as_mut() {
+        view.set_owned_value(&normalized_name, owned_value.clone())
+            .map_err(|error| error.to_string())?;
+    }
     state
         .mutable_values
-        .insert(crate::expressions::column_key(name), OwnedValue::from(value));
+        .insert(normalized_name.clone(), owned_value.clone());
+    Ok(())
 }
 
-pub(crate) fn reset_automatic_scalars(state: &mut EvalRuntimeState, global_row_index: i64) {
+pub(crate) fn reset_automatic_scalars(
+    state: &mut EvalRuntimeState,
+    global_row_index: i64,
+) -> Result<(), String> {
     state.automatic_values.clear();
     state.mutable_values.clear();
-    set_automatic_scalar(state, "_N_", ScalarValue::Number(global_row_index as f64));
-    set_automatic_scalar(state, "_ERROR_", ScalarValue::Number(0.0));
+    if let Some(view) = state.logical_row.as_mut() {
+        view.clear_automatic_values();
+        view.clear_owned_values();
+    }
+    set_automatic_scalar(state, "_N_", ScalarValue::Number(global_row_index as f64))?;
+    set_automatic_scalar(state, "_ERROR_", ScalarValue::Number(0.0))?;
+    Ok(())
 }
 
-pub(crate) fn mark_automatic_error(state: &mut EvalRuntimeState) {
-    set_automatic_scalar(state, "_ERROR_", ScalarValue::Number(1.0));
+pub(crate) fn mark_automatic_error(state: &mut EvalRuntimeState) -> Result<(), String> {
+    set_automatic_scalar(state, "_ERROR_", ScalarValue::Number(1.0))
 }
 
-pub(crate) fn set_runtime_flag(state: &mut EvalRuntimeState, name: &str, enabled: bool) {
-    set_automatic_scalar(state, name, ScalarValue::Bool(enabled));
+pub(crate) fn set_runtime_flag(
+    state: &mut EvalRuntimeState,
+    name: &str,
+    enabled: bool,
+) -> Result<(), String> {
+    set_automatic_scalar(state, name, ScalarValue::Bool(enabled))
 }
 
-pub(crate) fn set_runtime_text(state: &mut EvalRuntimeState, name: &str, value: String) {
-    set_automatic_scalar(state, name, ScalarValue::Text(value));
+pub(crate) fn set_runtime_text(
+    state: &mut EvalRuntimeState,
+    name: &str,
+    value: String,
+) -> Result<(), String> {
+    set_automatic_scalar(state, name, ScalarValue::Text(value))
+}
+
+pub(crate) fn get_stateful_owned_value(
+    state: &EvalRuntimeState,
+    name: &str,
+) -> Result<Option<OwnedValue>, String> {
+    let Some(view) = state.logical_row.as_ref() else {
+        return Err("logical row view is required for runtime value resolution".to_string());
+    };
+    let Some(value) = view.resolve(name).map_err(|error| error.to_string())? else {
+        return Ok(None);
+    };
+    match value {
+        crate::row_view::ResolvedValue::SourceScalar(value) => value.to_owned_value().map(Some),
+        crate::row_view::ResolvedValue::SourceCell(cell) => Ok(Some(OwnedValue::SourceCell(cell))),
+        crate::row_view::ResolvedValue::Owned(value)
+        | crate::row_view::ResolvedValue::Automatic(value) => Ok(Some(value.clone())),
+    }
 }
 
 pub(crate) fn store_runtime_scalar(
@@ -43,7 +100,7 @@ pub(crate) fn store_runtime_scalar(
     name: &str,
     value: &ScalarValue,
 ) -> Result<(), String> {
-    set_mutable_scalar(state, name, value.clone());
+    set_mutable_scalar(state, name, value.clone())?;
     if state.materialize_mutable_values {
         set_row_scalar(row, name, value)?;
     }
@@ -74,6 +131,8 @@ fn set_row_scalar(row: &Bound<'_, PyDict>, name: &str, value: &ScalarValue) -> R
         row.del_item(&duplicate_name).ok();
     }
     match value {
+        ScalarValue::Integer(integer) => row.set_item(&target_name, *integer),
+        ScalarValue::Unsigned(unsigned) => row.set_item(&target_name, *unsigned),
         ScalarValue::Number(number) => row.set_item(&target_name, *number),
         ScalarValue::Decimal(_) => row.set_item(&target_name, scalar_to_pyobject(row.py(), value)?),
         ScalarValue::Text(text) => row.set_item(&target_name, text.clone()),
@@ -85,6 +144,11 @@ fn set_row_scalar(row: &Bound<'_, PyDict>, name: &str, value: &ScalarValue) -> R
         ScalarValue::Time(time) => row.set_item(&target_name, temporal_scalar_to_pyany(row.py(), &ScalarValue::Time(*time))?),
         ScalarValue::List(_) | ScalarValue::Struct(_) => {
             row.set_item(&target_name, scalar_to_pyobject(row.py(), value)?)
+        }
+        ScalarValue::RawTimestamp { .. } | ScalarValue::RawTime { .. } => {
+            return Err(
+                "raw temporal scalar cannot be materialized into a Python row".to_string(),
+            );
         }
         ScalarValue::Null => row.set_item(&target_name, py_none(row.py())),
     }

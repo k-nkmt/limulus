@@ -31,6 +31,8 @@ set <dataset> [<dataset2> ...] [end=<var>] [indsname=<var>];
 | `indsname=src` | Stores the current dataset name in a variable |
 
 Listing multiple datasets performs a vertical concatenation.
+Shared columns must have matching types; mixed Arrow `string` and `large_string`
+columns are promoted to `large_string`.
 
 ### Interleaving with BY
 
@@ -59,9 +61,10 @@ merge <dataset>(in=<var>) [<dataset2>(in=<var>)];
 by <key>;
 ```
 
-The `in=` variable is `1` when a row exists in the source table, `0` otherwise.  
-If `by` is not specified, just concat.   
-If duplicate column names exist, an error is raised instead of overwriting.
+Duplicate non-`BY` column names raise an error instead of being overwritten.
+Repeated BY values across multiple inputs produce a warning.
+BY keys must have matching types; mixed Arrow `string` and `large_string` keys
+are promoted to `large_string`.
 
 ---
 
@@ -132,8 +135,12 @@ Makes `FIRST.<var>` / `LAST.<var>` automatic variables available.
 output [<dataset>];
 ```
 
-Without arguments, writes to all output destinations.  
-With an argument, writes only to the specified dataset.
+Without arguments, writes to the default destination: the first named `OUTPUT`
+target, or the first `DATA` target if no named `OUTPUT` exists.
+With names, writes to the specified destinations.
+
+Output references accept dataset options such as `KEEP`, `DROP`, and `RENAME`.
+References to the same destination share its options.
 
 ---
 
@@ -202,6 +209,19 @@ Performs cumulative addition without `RETAIN`.
 <varname> = <expression>;
 ```
 
+### String Concatenation in General Expressions
+
+Two strings can be joined with `+` or `||`, preserving spaces:
+
+```sas
+text_value = "a" + "B";    /* "aB" */
+digits = "1" + "2";        /* "12" */
+joined = "a" || "B";       /* "aB" */
+```
+
+These forms apply to Data Step expressions, not the Column API or dataset-option
+`WHERE=`.
+
 ---
 
 ## DELETE Statement
@@ -217,6 +237,8 @@ Does not output the current row (moves to the next iteration of the PDV loop).
 ## Built-in Functions
 
 ### String
+
+String positions and lengths use Unicode characters rather than bytes.
 
 | Function | Description | Example |
 |------|------|--------|
@@ -303,7 +325,7 @@ Current dict-catalog semantics are intentionally narrow:
 - `put(value, $myfmt.)` uses the same base name with the character-format namespace.
 - `input(value, myinf.)` returns `null` when no dict entry matches.
 - dict custom `input(...)` is float64-only in this phase; typed custom informats remain deferred.
-- callable registrations remain available, but they are separate low-level hooks rather than the serializable dict-catalog path.
+- callable format/informat registrations are unsupported; custom catalogs must be serializable mappings.
 
 
 ### Regular Expressions
@@ -329,4 +351,5 @@ Current dict-catalog semantics are intentionally narrow:
 | `shift(x, n)` | negative n behaves like `lag`, positive n like `lead` | `shift(x, -1)`<br>`shift(x, 1)` |
 | `apply` | Apply a Python callable by name. | `apply('double',amount)`<br>`apply('len',note)`<br>`apply('math.sqrt',value)` |
 
-> **Note:** `apply()` keeps the Rust row loop when the target can be resolved from a string name at execution setup time. Builtins such as `len`, dotted module functions such as `math.sqrt`, and in-scope Python helpers such as `double` are supported. Dynamic callable references that cannot be pre-resolved are not part of the Rust-first contract.
+> **Note:** `apply()` supports builtins, dotted functions such as `math.sqrt`, and
+> your own functions registered with `functions={"name": callable}`.

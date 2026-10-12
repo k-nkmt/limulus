@@ -1,17 +1,13 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
-from typing import Any
+from collections.abc import Iterable
 
-from ..models import DataSetRef
+from ..models import DataSetRef, PreparationKind
 
 
 _STANDARD_TRANSPORT_KIND = "arrow_table"
 _STANDARD_TRANSPORT_PATH = "standard"
-_SPECIAL_TRANSPORT_PATH = "special"
 _REJECTED_TRANSPORT_PATH = "rejected"
-_PREPARED_SET_ROWS_MARKER = "#prepared_set_rows"
-_PREPARED_MERGE_ROWS_MARKER = "#prepared_merge_rows"
 
 
 def _normalize_transport_kind(kind: str | None) -> str:
@@ -20,65 +16,48 @@ def _normalize_transport_kind(kind: str | None) -> str:
     return kind.strip().lower()
 
 
-def _has_prepared_transport_marker(location: str | None) -> bool:
-    if not isinstance(location, str):
-        return False
-    return (
-        _PREPARED_SET_ROWS_MARKER in location
-        or _PREPARED_MERGE_ROWS_MARKER in location
-    )
-
-
-def _has_prepared_transport_rows(payload: Any) -> bool:
-    return (
-        isinstance(payload, Sequence)
-        and not isinstance(payload, (str, bytes, bytearray))
-        and all(isinstance(item, Mapping) for item in payload)
-    )
-
-
-def _has_prepared_transport_arrow(payload: Any) -> bool:
-    return hasattr(payload, "__arrow_c_stream__")
-
-
 def _classify_transport_input(dataset_ref: DataSetRef) -> str:
     normalized_kind = _normalize_transport_kind(dataset_ref.kind)
-    if _has_prepared_transport_marker(dataset_ref.location):
-        if normalized_kind == _STANDARD_TRANSPORT_KIND and _has_prepared_transport_arrow(dataset_ref.payload):
-            return _SPECIAL_TRANSPORT_PATH
-        if normalized_kind == "memory" and _has_prepared_transport_rows(dataset_ref.payload):
-            return _SPECIAL_TRANSPORT_PATH
-
     if normalized_kind == _STANDARD_TRANSPORT_KIND:
         return _STANDARD_TRANSPORT_PATH
 
     return _REJECTED_TRANSPORT_PATH
 
 
-def _uses_prepared_merge_transport(dataset_ref: DataSetRef) -> bool:
-    return _classify_transport_input(dataset_ref) == _SPECIAL_TRANSPORT_PATH and (
-        _PREPARED_MERGE_ROWS_MARKER in (dataset_ref.location or "")
-    )
+def derive_preparation_kind(dataset_refs: Iterable[DataSetRef]) -> PreparationKind:
+    """Aggregate typed carrier provenance into one transport preparation kind.
 
+    Provenance is read from the typed ``DataSetRef.preparation`` contract only:
+    ``location`` is opaque user data and is never scanned.  ``none`` carriers
+    do not participate; a single distinct prepared kind becomes the aggregate.
+    Mixed kinds cannot be produced by the validated preparation flow, so this
+    layer treats them as an upstream contract bug and fails closed instead of
+    preferring MERGE over SET.
+    """
 
-def _uses_prepared_set_transport(dataset_ref: DataSetRef) -> bool:
-    return _classify_transport_input(dataset_ref) == _SPECIAL_TRANSPORT_PATH and (
-        _PREPARED_SET_ROWS_MARKER in (dataset_ref.location or "")
+    observed_kinds: set[str] = set()
+    for dataset_ref in dataset_refs:
+        provenance = getattr(dataset_ref, "preparation", None)
+        kind = getattr(provenance, "kind", "none")
+        if kind != "none":
+            observed_kinds.add(str(kind))
+
+    if not observed_kinds:
+        return "none"
+    if len(observed_kinds) == 1:
+        return next(iter(observed_kinds))  # type: ignore[return-value]
+    raise ValueError(
+        "prepared carriers mix preparation kinds "
+        f"{sorted(observed_kinds)}; the validated preparation flow cannot "
+        "hand off an ambiguous aggregate kind"
     )
 
 
 __all__ = [
     "_classify_transport_input",
-    "_has_prepared_transport_arrow",
-    "_has_prepared_transport_marker",
-    "_has_prepared_transport_rows",
     "_normalize_transport_kind",
-    "_PREPARED_MERGE_ROWS_MARKER",
-    "_PREPARED_SET_ROWS_MARKER",
     "_REJECTED_TRANSPORT_PATH",
-    "_SPECIAL_TRANSPORT_PATH",
     "_STANDARD_TRANSPORT_KIND",
     "_STANDARD_TRANSPORT_PATH",
-    "_uses_prepared_merge_transport",
-    "_uses_prepared_set_transport",
+    "derive_preparation_kind",
 ]

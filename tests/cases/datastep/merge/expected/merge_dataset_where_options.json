@@ -1,0 +1,11 @@
+{
+  "datasets": {
+    "out": {
+      "columns": ["id", "left_value", "right_value"],
+      "rows": [
+        [2, 20, 200],
+        [3, null, 300]
+      ]
+    }
+  }
+}

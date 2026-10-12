@@ -2,22 +2,19 @@ use crate::expressions::{column_key, ScalarValue};
 use crate::value_ref::SourceValueRef;
 use arrow::array::{
     Array,
+    ArrayRef,
     BooleanArray,
     Date32Array,
     Date64Array,
     Decimal128Array,
-    FixedSizeListArray,
     Float32Array,
     Float64Array,
     Int16Array,
     Int32Array,
     Int64Array,
     Int8Array,
-    LargeListArray,
     LargeStringArray,
-    ListArray,
     StringArray,
-    StructArray,
     Time32MillisecondArray,
     Time32SecondArray,
     Time64MicrosecondArray,
@@ -32,7 +29,7 @@ use arrow::array::{
     UInt8Array,
 };
 use arrow::compute::cast;
-use arrow::datatypes::{DataType, Schema, TimeUnit};
+use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use arrow::ffi_stream::{ArrowArrayStreamReader, FFI_ArrowArrayStream};
 use arrow::record_batch::{RecordBatch, RecordBatchReader};
 use arrow::temporal_conversions::{
@@ -40,12 +37,6 @@ use arrow::temporal_conversions::{
     date64_to_datetime,
     time32ms_to_time,
     time32s_to_time,
-    time64ns_to_time,
-    time64us_to_time,
-    timestamp_ms_to_datetime,
-    timestamp_ns_to_datetime,
-    timestamp_s_to_datetime,
-    timestamp_us_to_datetime,
 };
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyCapsule, PyCapsuleMethods};
@@ -180,7 +171,12 @@ impl NativeSourceView {
         slot_index: usize,
     ) -> Result<Option<SourceValueRef<'_>>, String> {
         if slot_index >= self.slot_order.len() {
-            return Ok(None);
+            // Out-of-range slot indices are slot invariant violations, distinct
+            // from unknown column name lookups which keep returning None.
+            return Err(format!(
+                "source slot index {slot_index} out of range for declared slot count {}",
+                self.slot_order.len()
+            ));
         }
         let (batch_index, batch_row_index) = self.batch_row_location(row_index)?;
         let batch = self
@@ -207,7 +203,48 @@ impl NativeSourceView {
         Ok(Some(SourceValueRef::Scalar(value)))
     }
 
-    fn batch_row_location(&self, row_index: usize) -> Result<(usize, usize), String> {
+    pub(crate) fn validate_cell_location(
+        &self,
+        row_index: usize,
+        slot_index: usize,
+    ) -> Result<(), String> {
+        if slot_index >= self.slot_order.len() {
+            return Err(format!("source slot index out of range: {slot_index}"));
+        }
+        let (batch_index, _) = self.batch_row_location(row_index)?;
+        let batch = self
+            .batches
+            .get(batch_index)
+            .ok_or_else(|| format!("source batch index out of range: {batch_index}"))?;
+        if batch.columns().get(slot_index).is_none() {
+            return Err(format!("source slot index out of range: {slot_index}"));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn array_at(
+        &self,
+        row_index: usize,
+        slot_index: usize,
+    ) -> Result<ArrayRef, String> {
+        self.validate_cell_location(row_index, slot_index)?;
+        let (batch_index, _) = self.batch_row_location(row_index)?;
+        self.batches
+            .get(batch_index)
+            .and_then(|batch| batch.columns().get(slot_index))
+            .cloned()
+            .ok_or_else(|| format!("source slot index out of range: {slot_index}"))
+    }
+
+    pub(crate) fn field_at(&self, slot_index: usize) -> Option<Arc<Field>> {
+        self.schema.fields().get(slot_index).cloned()
+    }
+
+    pub(crate) fn record_batch_at(&self, batch_index: usize) -> Option<RecordBatch> {
+        self.batches.get(batch_index).cloned()
+    }
+
+    pub(crate) fn batch_row_location(&self, row_index: usize) -> Result<(usize, usize), String> {
         if row_index >= self.row_count {
             return Err(format!("row index out of range: {row_index}"));
         }
@@ -265,6 +302,17 @@ fn decode_slot_values_from_array(array: &dyn Array) -> Result<Vec<ScalarValue>, 
     Ok(slot_values)
 }
 
+fn source_backed_required_error(data_type: &DataType) -> String {
+    format!("source-backed value required for nested Arrow source column type: {data_type:?}")
+}
+
+fn timestamp_timezone(array: &dyn Array) -> Option<String> {
+    match array.data_type() {
+        DataType::Timestamp(_, timezone) => timezone.as_ref().map(ToString::to_string),
+        _ => unreachable!("timestamp timezone requested for a non-timestamp array"),
+    }
+}
+
 fn extend_slot_values_from_array(slot_values: &mut Vec<ScalarValue>, array: &dyn Array) -> Result<(), String> {
     match array.data_type() {
         DataType::Null => {
@@ -280,28 +328,28 @@ fn extend_slot_values_from_array(slot_values: &mut Vec<ScalarValue>, array: &dyn
             Ok(ScalarValue::Number(values.value(row) as f64))
         }),
         DataType::Int64 => extend_nullable_values(slot_values, downcast_array::<Int64Array>(array, "Int64Array")?, |values, row| {
-            Ok(ScalarValue::Number(values.value(row) as f64))
+            Ok(ScalarValue::Integer(values.value(row)))
         }),
         DataType::Int32 => extend_nullable_values(slot_values, downcast_array::<Int32Array>(array, "Int32Array")?, |values, row| {
-            Ok(ScalarValue::Number(values.value(row) as f64))
+            Ok(ScalarValue::Integer(i64::from(values.value(row))))
         }),
         DataType::Int16 => extend_nullable_values(slot_values, downcast_array::<Int16Array>(array, "Int16Array")?, |values, row| {
-            Ok(ScalarValue::Number(values.value(row) as f64))
+            Ok(ScalarValue::Integer(i64::from(values.value(row))))
         }),
         DataType::Int8 => extend_nullable_values(slot_values, downcast_array::<Int8Array>(array, "Int8Array")?, |values, row| {
-            Ok(ScalarValue::Number(values.value(row) as f64))
+            Ok(ScalarValue::Integer(i64::from(values.value(row))))
         }),
         DataType::UInt64 => extend_nullable_values(slot_values, downcast_array::<UInt64Array>(array, "UInt64Array")?, |values, row| {
-            Ok(ScalarValue::Number(values.value(row) as f64))
+            Ok(ScalarValue::Unsigned(values.value(row)))
         }),
         DataType::UInt32 => extend_nullable_values(slot_values, downcast_array::<UInt32Array>(array, "UInt32Array")?, |values, row| {
-            Ok(ScalarValue::Number(values.value(row) as f64))
+            Ok(ScalarValue::Unsigned(u64::from(values.value(row))))
         }),
         DataType::UInt16 => extend_nullable_values(slot_values, downcast_array::<UInt16Array>(array, "UInt16Array")?, |values, row| {
-            Ok(ScalarValue::Number(values.value(row) as f64))
+            Ok(ScalarValue::Unsigned(u64::from(values.value(row))))
         }),
         DataType::UInt8 => extend_nullable_values(slot_values, downcast_array::<UInt8Array>(array, "UInt8Array")?, |values, row| {
-            Ok(ScalarValue::Number(values.value(row) as f64))
+            Ok(ScalarValue::Unsigned(u64::from(values.value(row))))
         }),
         DataType::Decimal128(precision, scale) => extend_nullable_values(
             slot_values,
@@ -317,22 +365,10 @@ fn extend_slot_values_from_array(slot_values: &mut Vec<ScalarValue>, array: &dyn
         DataType::LargeUtf8 => extend_nullable_values(slot_values, downcast_array::<LargeStringArray>(array, "LargeStringArray")?, |values, row| {
             Ok(ScalarValue::Text(values.value(row).to_string()))
         }),
-        DataType::List(_) => extend_nullable_values(slot_values, downcast_array::<ListArray>(array, "ListArray")?, |values, row| {
-            list_scalar_from_array(values.value(row).as_ref())
-        }),
-        DataType::LargeList(_) => extend_nullable_values(
-            slot_values,
-            downcast_array::<LargeListArray>(array, "LargeListArray")?,
-            |values, row| list_scalar_from_array(values.value(row).as_ref()),
-        ),
-        DataType::FixedSizeList(_, _) => extend_nullable_values(
-            slot_values,
-            downcast_array::<FixedSizeListArray>(array, "FixedSizeListArray")?,
-            |values, row| list_scalar_from_array(values.value(row).as_ref()),
-        ),
-        DataType::Struct(_) => extend_nullable_values(slot_values, downcast_array::<StructArray>(array, "StructArray")?, |values, row| {
-            struct_scalar_from_array(values, row)
-        }),
+        DataType::List(_)
+        | DataType::LargeList(_)
+        | DataType::FixedSizeList(_, _)
+        | DataType::Struct(_) => Err(source_backed_required_error(array.data_type())),
         DataType::Date32 => extend_nullable_values(slot_values, downcast_array::<Date32Array>(array, "Date32Array")?, |values, row| {
             let datetime = date32_to_datetime(values.value(row))
                 .ok_or_else(|| format!("failed to decode date32 value at row {row}"))?;
@@ -346,22 +382,38 @@ fn extend_slot_values_from_array(slot_values: &mut Vec<ScalarValue>, array: &dyn
         DataType::Timestamp(TimeUnit::Second, _) => extend_nullable_values(
             slot_values,
             downcast_array::<TimestampSecondArray>(array, "TimestampSecondArray")?,
-            |values, row| temporal_datetime_scalar(timestamp_s_to_datetime(values.value(row)), row, "timestamp[s]"),
+            |values, row| Ok(ScalarValue::RawTimestamp {
+                value: values.value(row),
+                unit: TimeUnit::Second,
+                timezone: timestamp_timezone(array),
+            }),
         ),
         DataType::Timestamp(TimeUnit::Millisecond, _) => extend_nullable_values(
             slot_values,
             downcast_array::<TimestampMillisecondArray>(array, "TimestampMillisecondArray")?,
-            |values, row| temporal_datetime_scalar(timestamp_ms_to_datetime(values.value(row)), row, "timestamp[ms]"),
+            |values, row| Ok(ScalarValue::RawTimestamp {
+                value: values.value(row),
+                unit: TimeUnit::Millisecond,
+                timezone: timestamp_timezone(array),
+            }),
         ),
         DataType::Timestamp(TimeUnit::Microsecond, _) => extend_nullable_values(
             slot_values,
             downcast_array::<TimestampMicrosecondArray>(array, "TimestampMicrosecondArray")?,
-            |values, row| temporal_datetime_scalar(timestamp_us_to_datetime(values.value(row)), row, "timestamp[us]"),
+            |values, row| Ok(ScalarValue::RawTimestamp {
+                value: values.value(row),
+                unit: TimeUnit::Microsecond,
+                timezone: timestamp_timezone(array),
+            }),
         ),
         DataType::Timestamp(TimeUnit::Nanosecond, _) => extend_nullable_values(
             slot_values,
             downcast_array::<TimestampNanosecondArray>(array, "TimestampNanosecondArray")?,
-            |values, row| temporal_datetime_scalar(timestamp_ns_to_datetime(values.value(row)), row, "timestamp[ns]"),
+            |values, row| Ok(ScalarValue::RawTimestamp {
+                value: values.value(row),
+                unit: TimeUnit::Nanosecond,
+                timezone: timestamp_timezone(array),
+            }),
         ),
         DataType::Time32(TimeUnit::Second) => extend_nullable_values(
             slot_values,
@@ -376,12 +428,18 @@ fn extend_slot_values_from_array(slot_values: &mut Vec<ScalarValue>, array: &dyn
         DataType::Time64(TimeUnit::Microsecond) => extend_nullable_values(
             slot_values,
             downcast_array::<Time64MicrosecondArray>(array, "Time64MicrosecondArray")?,
-            |values, row| temporal_time_scalar(time64us_to_time(values.value(row)), row, "time64[us]"),
+            |values, row| Ok(ScalarValue::RawTime {
+                value: values.value(row),
+                unit: TimeUnit::Microsecond,
+            }),
         ),
         DataType::Time64(TimeUnit::Nanosecond) => extend_nullable_values(
             slot_values,
             downcast_array::<Time64NanosecondArray>(array, "Time64NanosecondArray")?,
-            |values, row| temporal_time_scalar(time64ns_to_time(values.value(row)), row, "time64[ns]"),
+            |values, row| Ok(ScalarValue::RawTime {
+                value: values.value(row),
+                unit: TimeUnit::Nanosecond,
+            }),
         ),
         DataType::Dictionary(_, value_type) => {
             let decoded = cast(array, value_type.as_ref())
@@ -441,45 +499,6 @@ fn decimal128_to_string(value: i128, scale: usize) -> String {
     }
 }
 
-fn list_scalar_from_array(array: &dyn Array) -> Result<ScalarValue, String> {
-    let mut values = Vec::with_capacity(array.len());
-    for row_index in 0..array.len() {
-        values.push(scalar_value_from_array_row(array, row_index)?);
-    }
-    Ok(ScalarValue::List(values))
-}
-
-fn struct_scalar_from_array(values: &StructArray, row_index: usize) -> Result<ScalarValue, String> {
-    let DataType::Struct(fields) = values.data_type() else {
-        return Err("failed to resolve struct Arrow source column metadata".to_string());
-    };
-
-    let mut items = Vec::with_capacity(fields.len());
-    for (field_index, field) in fields.iter().enumerate() {
-        items.push((
-            field.name().to_string(),
-            scalar_value_from_array_row(values.column(field_index).as_ref(), row_index)?,
-        ));
-    }
-    Ok(ScalarValue::Struct(items))
-}
-
-fn scalar_value_from_array_row(array: &dyn Array, row_index: usize) -> Result<ScalarValue, String> {
-    if row_index >= array.len() {
-        return Err(format!("Arrow row index out of bounds: {row_index}"));
-    }
-    if array.is_null(row_index) {
-        return Ok(ScalarValue::Null);
-    }
-
-    let slice = array.slice(row_index, 1);
-    let mut values = Vec::with_capacity(1);
-    extend_slot_values_from_array(&mut values, slice.as_ref())?;
-    values
-        .pop()
-        .ok_or_else(|| format!("failed to decode Arrow value at row {row_index}"))
-}
-
 fn temporal_datetime_scalar(
     value: Option<chrono::NaiveDateTime>,
     row_index: usize,
@@ -504,17 +523,32 @@ mod tests {
     use crate::expressions::ScalarValue;
     use crate::value_ref::SourceValueRef;
     use arrow::array::{
+        FixedSizeListArray,
         new_null_array,
         ArrayRef,
         BooleanArray,
         Float64Array,
+        Int16Array,
+        Int32Array,
         Int64Array,
+        Int8Array,
+        LargeListArray,
         ListArray,
         StringArray,
         StringDictionaryBuilder,
         StructArray,
+        Time64MicrosecondArray,
+        Time64NanosecondArray,
+        TimestampMicrosecondArray,
+        TimestampMillisecondArray,
+        TimestampNanosecondArray,
+        TimestampSecondArray,
+        UInt16Array,
+        UInt32Array,
+        UInt64Array,
+        UInt8Array,
     };
-    use arrow::datatypes::{DataType, Field, Fields, Int64Type, Int8Type, Schema};
+    use arrow::datatypes::{DataType, Field, Fields, Int32Type, Int64Type, Int8Type, Schema, TimeUnit};
     use arrow::record_batch::RecordBatch;
     use std::sync::Arc;
 
@@ -593,54 +627,316 @@ mod tests {
     }
 
     #[test]
+    fn native_source_view_decodes_integer_widths_as_exact_signedness() {
+        let batch = RecordBatch::try_from_iter(vec![
+            (
+                "i8",
+                Arc::new(Int8Array::from(vec![Some(i8::MIN), None, Some(i8::MAX)])) as ArrayRef,
+            ),
+            (
+                "i16",
+                Arc::new(Int16Array::from(vec![Some(i16::MIN), None, Some(i16::MAX)])) as ArrayRef,
+            ),
+            (
+                "i32",
+                Arc::new(Int32Array::from(vec![Some(i32::MIN), None, Some(i32::MAX)])) as ArrayRef,
+            ),
+            (
+                "i64",
+                Arc::new(Int64Array::from(vec![Some(i64::MIN), None, Some(i64::MAX)])) as ArrayRef,
+            ),
+            (
+                "u8",
+                Arc::new(UInt8Array::from(vec![Some(0_u8), None, Some(u8::MAX)])) as ArrayRef,
+            ),
+            (
+                "u16",
+                Arc::new(UInt16Array::from(vec![Some(0_u16), None, Some(u16::MAX)])) as ArrayRef,
+            ),
+            (
+                "u32",
+                Arc::new(UInt32Array::from(vec![Some(0_u32), None, Some(u32::MAX)])) as ArrayRef,
+            ),
+            (
+                "u64",
+                Arc::new(UInt64Array::from(vec![Some(0_u64), None, Some(u64::MAX)])) as ArrayRef,
+            ),
+        ])
+        .expect("integer batch");
+        let view = NativeSourceView::from_record_batches(vec![batch]).expect("source view");
+
+        assert_eq!(
+            view.value_by_name(0, "i8").expect("i8 access").expect("i8 value").as_scalar().expect("scalar"),
+            &ScalarValue::Integer(i64::from(i8::MIN))
+        );
+        assert_eq!(
+            view.value_by_name(2, "i8").expect("i8 access").expect("i8 value").as_scalar().expect("scalar"),
+            &ScalarValue::Integer(i64::from(i8::MAX))
+        );
+        assert_eq!(
+            view.value_by_name(0, "i16").expect("i16 access").expect("i16 value").as_scalar().expect("scalar"),
+            &ScalarValue::Integer(i64::from(i16::MIN))
+        );
+        assert_eq!(
+            view.value_by_name(2, "i16").expect("i16 access").expect("i16 value").as_scalar().expect("scalar"),
+            &ScalarValue::Integer(i64::from(i16::MAX))
+        );
+        assert_eq!(
+            view.value_by_name(0, "i32").expect("i32 access").expect("i32 value").as_scalar().expect("scalar"),
+            &ScalarValue::Integer(i64::from(i32::MIN))
+        );
+        assert_eq!(
+            view.value_by_name(2, "i32").expect("i32 access").expect("i32 value").as_scalar().expect("scalar"),
+            &ScalarValue::Integer(i64::from(i32::MAX))
+        );
+        assert_eq!(
+            view.value_by_name(0, "i64").expect("i64 access").expect("i64 value").as_scalar().expect("scalar"),
+            &ScalarValue::Integer(i64::MIN)
+        );
+        assert_eq!(
+            view.value_by_name(2, "i64").expect("i64 access").expect("i64 value").as_scalar().expect("scalar"),
+            &ScalarValue::Integer(i64::MAX)
+        );
+        assert_eq!(
+            view.value_by_name(0, "u8").expect("u8 access").expect("u8 value").as_scalar().expect("scalar"),
+            &ScalarValue::Unsigned(0)
+        );
+        assert_eq!(
+            view.value_by_name(2, "u8").expect("u8 access").expect("u8 value").as_scalar().expect("scalar"),
+            &ScalarValue::Unsigned(u64::from(u8::MAX))
+        );
+        assert_eq!(
+            view.value_by_name(0, "u16").expect("u16 access").expect("u16 value").as_scalar().expect("scalar"),
+            &ScalarValue::Unsigned(0)
+        );
+        assert_eq!(
+            view.value_by_name(2, "u16").expect("u16 access").expect("u16 value").as_scalar().expect("scalar"),
+            &ScalarValue::Unsigned(u64::from(u16::MAX))
+        );
+        assert_eq!(
+            view.value_by_name(0, "u32").expect("u32 access").expect("u32 value").as_scalar().expect("scalar"),
+            &ScalarValue::Unsigned(0)
+        );
+        assert_eq!(
+            view.value_by_name(2, "u32").expect("u32 access").expect("u32 value").as_scalar().expect("scalar"),
+            &ScalarValue::Unsigned(u64::from(u32::MAX))
+        );
+        assert_eq!(
+            view.value_by_name(0, "u64").expect("u64 access").expect("u64 value").as_scalar().expect("scalar"),
+            &ScalarValue::Unsigned(0)
+        );
+        assert_eq!(
+            view.value_by_name(2, "u64").expect("u64 access").expect("u64 value").as_scalar().expect("scalar"),
+            &ScalarValue::Unsigned(u64::MAX)
+        );
+
+        for name in ["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"] {
+            assert_eq!(
+                view.value_by_name(1, name).expect("null access").expect("null value").as_scalar().expect("scalar"),
+                &ScalarValue::Null,
+                "{name} NULL should remain NULL"
+            );
+        }
+    }
+
+    #[test]
+    fn native_source_view_decodes_timestamps_as_raw_values_with_units_and_timezone() {
+        let batch = RecordBatch::try_from_iter(vec![
+            (
+                "seconds",
+                Arc::new(TimestampSecondArray::from(vec![Some(-1_i64), None, Some(1_i64)]))
+                    as ArrayRef,
+            ),
+            (
+                "milliseconds",
+                Arc::new(TimestampMillisecondArray::from(vec![
+                    Some(-1_i64),
+                    None,
+                    Some(1_i64),
+                ])) as ArrayRef,
+            ),
+            (
+                "microseconds",
+                Arc::new(TimestampMicrosecondArray::from(vec![
+                    Some(-1_i64),
+                    None,
+                    Some(1_i64),
+                ])) as ArrayRef,
+            ),
+            (
+                "nanoseconds",
+                Arc::new(
+                    TimestampNanosecondArray::from(vec![Some(i64::MIN), None, Some(i64::MAX)])
+                        .with_timezone("Asia/Tokyo"),
+                ) as ArrayRef,
+            ),
+        ])
+        .expect("timestamp batch");
+        let view = NativeSourceView::from_record_batches(vec![batch]).expect("source view");
+
+        assert_eq!(
+            view.value_by_name(0, "seconds")
+                .expect("seconds access")
+                .expect("seconds value")
+                .as_scalar().expect("scalar"),
+            &ScalarValue::RawTimestamp {
+                value: -1,
+                unit: TimeUnit::Second,
+                timezone: None,
+            }
+        );
+        assert_eq!(
+            view.value_by_name(0, "milliseconds")
+                .expect("milliseconds access")
+                .expect("milliseconds value")
+                .as_scalar().expect("scalar"),
+            &ScalarValue::RawTimestamp {
+                value: -1,
+                unit: TimeUnit::Millisecond,
+                timezone: None,
+            }
+        );
+        assert_eq!(
+            view.value_by_name(0, "microseconds")
+                .expect("microseconds access")
+                .expect("microseconds value")
+                .as_scalar().expect("scalar"),
+            &ScalarValue::RawTimestamp {
+                value: -1,
+                unit: TimeUnit::Microsecond,
+                timezone: None,
+            }
+        );
+        assert_eq!(
+            view.value_by_name(0, "nanoseconds")
+                .expect("nanoseconds access")
+                .expect("nanoseconds value")
+                .as_scalar().expect("scalar"),
+            &ScalarValue::RawTimestamp {
+                value: i64::MIN,
+                unit: TimeUnit::Nanosecond,
+                timezone: Some("Asia/Tokyo".to_string()),
+            }
+        );
+        assert_eq!(
+            view.value_by_name(2, "nanoseconds")
+                .expect("nanoseconds access")
+                .expect("nanoseconds value")
+                .as_scalar().expect("scalar"),
+            &ScalarValue::RawTimestamp {
+                value: i64::MAX,
+                unit: TimeUnit::Nanosecond,
+                timezone: Some("Asia/Tokyo".to_string()),
+            }
+        );
+
+        for name in ["seconds", "milliseconds", "microseconds", "nanoseconds"] {
+            assert_eq!(
+                view.value_by_name(1, name).expect("null access").expect("null value").as_scalar().expect("scalar"),
+                &ScalarValue::Null,
+                "{name} NULL should remain NULL"
+            );
+        }
+    }
+
+    #[test]
+    fn native_source_view_decodes_time64_as_raw_values_with_units() {
+        let batch = RecordBatch::try_from_iter(vec![
+            (
+                "microseconds",
+                Arc::new(Time64MicrosecondArray::from(vec![
+                    Some(-1_i64),
+                    None,
+                    Some(86_399_999_999_i64),
+                ])) as ArrayRef,
+            ),
+            (
+                "nanoseconds",
+                Arc::new(Time64NanosecondArray::from(vec![
+                    Some(-1_i64),
+                    None,
+                    Some(86_399_999_999_999_i64),
+                ])) as ArrayRef,
+            ),
+        ])
+        .expect("time64 batch");
+        let view = NativeSourceView::from_record_batches(vec![batch]).expect("source view");
+
+        assert_eq!(
+            view.value_by_name(0, "microseconds")
+                .expect("microseconds access")
+                .expect("microseconds value")
+                .as_scalar().expect("scalar"),
+            &ScalarValue::RawTime {
+                value: -1,
+                unit: TimeUnit::Microsecond,
+            }
+        );
+        assert_eq!(
+            view.value_by_name(2, "nanoseconds")
+                .expect("nanoseconds access")
+                .expect("nanoseconds value")
+                .as_scalar().expect("scalar"),
+            &ScalarValue::RawTime {
+                value: 86_399_999_999_999,
+                unit: TimeUnit::Nanosecond,
+            }
+        );
+        for name in ["microseconds", "nanoseconds"] {
+            assert_eq!(
+                view.value_by_name(1, name).expect("null access").expect("null value").as_scalar().expect("scalar"),
+                &ScalarValue::Null,
+                "{name} NULL should remain NULL"
+            );
+        }
+    }
+
+    #[test]
+    fn native_source_view_gates_nested_values_until_source_backed_refs_exist() {
+        let list = ListArray::from_iter_primitive::<Int32Type, _, _>(vec![Some(vec![Some(1_i32)])]);
+        let large_list =
+            LargeListArray::from_iter_primitive::<Int32Type, _, _>(vec![Some(vec![Some(2_i32)])]);
+        let fixed_size_list =
+            FixedSizeListArray::from_iter_primitive::<Int32Type, _, _>(vec![Some(vec![Some(3_i32)])], 1);
+        let struct_array = StructArray::from(vec![
+            (
+                Arc::new(Field::new("value", DataType::Int32, true)),
+                Arc::new(Int32Array::from(vec![Some(4_i32)])) as ArrayRef,
+            ),
+        ]);
+        let batch = RecordBatch::try_from_iter(vec![
+            ("list", Arc::new(list) as ArrayRef),
+            ("large_list", Arc::new(large_list) as ArrayRef),
+            ("fixed_size_list", Arc::new(fixed_size_list) as ArrayRef),
+            ("struct", Arc::new(struct_array) as ArrayRef),
+        ])
+        .expect("nested batch");
+        let view = NativeSourceView::from_record_batches(vec![batch]).expect("source view");
+
+        for name in ["list", "large_list", "fixed_size_list", "struct"] {
+            let error = view
+                .value_by_name(0, name)
+                .expect_err("nested value should fail closed");
+            assert!(
+                error.contains("source-backed value required"),
+                "{name}: unexpected nested gate error: {error}"
+            );
+        }
+    }
+
+    #[test]
     fn native_source_view_reads_supported_success_path_types_by_name() {
-        let tags = ListArray::from_iter_primitive::<Int64Type, _, _>(vec![
-            Some(vec![Some(1_i64), Some(2_i64)]),
-            None,
-        ]);
-        let meta = StructArray::from(vec![
-            (
-                Arc::new(Field::new("score", DataType::Int64, true)),
-                Arc::new(Int64Array::from(vec![Some(10_i64), None])) as ArrayRef,
-            ),
-            (
-                Arc::new(Field::new("flag", DataType::Boolean, true)),
-                Arc::new(BooleanArray::from(vec![Some(true), Some(false)])) as ArrayRef,
-            ),
-        ]);
         let mut category_builder = StringDictionaryBuilder::<Int8Type>::new();
         category_builder.append("alpha").expect("append first dictionary value");
         category_builder.append_null();
         let category = category_builder.finish();
         let batch = RecordBatch::try_from_iter(vec![
             ("Id", Arc::new(Float64Array::from(vec![Some(1.0), Some(2.0)])) as ArrayRef),
-            ("Tags", Arc::new(tags) as ArrayRef),
-            ("Meta", Arc::new(meta) as ArrayRef),
             ("Category", Arc::new(category) as ArrayRef),
         ])
         .expect("record batch");
 
         let view = NativeSourceView::from_record_batches(vec![batch]).expect("source view");
-
-        match view.value_by_name(0, "tags").expect("tags access").expect("tags value") {
-            SourceValueRef::Scalar(ScalarValue::List(values)) => {
-                assert_eq!(values, &vec![ScalarValue::Number(1.0), ScalarValue::Number(2.0)]);
-            }
-            other => panic!("unexpected tags value ref: {other:?}"),
-        }
-
-        match view.value_by_name(0, "META").expect("meta access").expect("meta value") {
-            SourceValueRef::Scalar(ScalarValue::Struct(values)) => {
-                assert_eq!(
-                    values,
-                    &vec![
-                        ("score".to_string(), ScalarValue::Number(10.0)),
-                        ("flag".to_string(), ScalarValue::Bool(true)),
-                    ]
-                );
-            }
-            other => panic!("unexpected meta value ref: {other:?}"),
-        }
 
         match view
             .value_by_name(0, "category")
@@ -734,13 +1030,6 @@ mod tests {
                 "Name",
                 Arc::new(StringArray::from(vec![None, Some("beta")])) as ArrayRef,
             ),
-            (
-                "Tags",
-                Arc::new(ListArray::from_iter_primitive::<Int64Type, _, _>(vec![
-                    None,
-                    Some(vec![Some(3_i64), None]),
-                ])) as ArrayRef,
-            ),
             ("Category", Arc::new(category) as ArrayRef),
         ])
         .expect("nullable-general-case batch");
@@ -760,15 +1049,62 @@ mod tests {
             other => panic!("unexpected nullable category value ref: {other:?}"),
         }
 
-        match view.value_by_name(1, "tags").expect("tags access").expect("tags value") {
-            SourceValueRef::Scalar(ScalarValue::List(values)) => {
-                assert_eq!(values, &vec![ScalarValue::Number(3.0), ScalarValue::Null]);
-            }
-            other => panic!("unexpected nullable tags value ref: {other:?}"),
-        }
         match view.value_by_name(1, "CATEGORY").expect("category value access").expect("category row value") {
             SourceValueRef::Scalar(ScalarValue::Text(value)) => assert_eq!(value, "beta"),
             other => panic!("unexpected category row value ref: {other:?}"),
         }
+    }
+
+    fn two_slot_source_view() -> NativeSourceView {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Float64, true),
+            Field::new("name", DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![Some(1.0)])),
+                Arc::new(StringArray::from(vec![Some("alpha")])),
+            ],
+        )
+        .expect("batch");
+        NativeSourceView::from_record_batches(vec![batch]).expect("source view")
+    }
+
+    #[test]
+    fn out_of_range_slot_index_is_an_invariant_error() {
+        let view = two_slot_source_view();
+
+        let error = view.value_at(0, 2).unwrap_err();
+        assert!(error.contains("source slot index 2"), "{error}");
+        assert!(error.contains("declared slot count 2"), "{error}");
+
+        let error = view.value_at(0, 99).unwrap_err();
+        assert!(error.contains("source slot index 99"), "{error}");
+        assert!(error.contains("declared slot count 2"), "{error}");
+    }
+
+    #[test]
+    fn unknown_column_name_lookup_stays_none() {
+        let view = two_slot_source_view();
+
+        assert!(view.value_by_name(0, "missing").expect("name lookup").is_none());
+        assert!(view
+            .value_by_normalized_name(0, "MISSING")
+            .expect("normalized lookup")
+            .is_none());
+    }
+
+    #[test]
+    fn in_bounds_slot_lookups_are_unchanged() {
+        let view = two_slot_source_view();
+
+        assert!(view.value_at(0, 0).expect("slot 0").is_some());
+        assert!(view.value_at(0, 1).expect("slot 1").is_some());
+        assert!(view
+            .value_at(0, 2)
+            .map(|value| value.is_some())
+            .expect_err("slot 2 stays an invariant error")
+            .contains("source slot index 2"));
     }
 }

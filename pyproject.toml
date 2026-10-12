@@ -1,6 +1,6 @@
 [project]
 name = "limulus"
-version = "0.5.0"
+version = "0.6.0"
 description = "DataStep for Your Workspace"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -48,6 +48,7 @@ dev = [
     "sphinx-book-theme>=1.1.4",
     "notebook>=7.5.3",
     "matplotlib>=3.8",
+    "ty==0.0.72",
 ]
 
 [build-system]
@@ -58,7 +59,21 @@ build-backend = "maturin"
 manifest-path = "native/limulus_native/Cargo.toml"
 module-name = "limulus_native"
 python-packages = ["limulus"]
+features = ["extension-module"]
+no-default-features = true
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+
+[tool.ty.environment]
+python-version = "3.10"
+
+[tool.ty.src]
+include = [
+    "limulus/models.py",
+    "limulus/execution/strategy.py",
+    "limulus/host_functions.py",
+    "limulus/backend_integration/contracts.py",
+    "limulus/dataset_option_expressions.py",
+]

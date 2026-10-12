@@ -3,9 +3,9 @@
 create_table_stmt: CREATE TABLE sql_name AS QUERY_TEXT
 sql_name: NAME (DOT NAME)*
 
-CREATE.5: /[cC][rR][eE][aA][tT][eE]/
-TABLE.5: /[tT][aA][bB][lL][eE]/
-AS.5: /[aA][sS]/
+CREATE.5: /(?ai:create)/
+TABLE.5: /(?ai:table)/
+AS.5: /(?ai:as)/
 NAME.4: /[A-Za-z_][\w]*/
 DOT: "."
 QUERY_TEXT: /(.|\n)+/

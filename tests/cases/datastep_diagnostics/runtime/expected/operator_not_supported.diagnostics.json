@@ -6,7 +6,7 @@
       "severity": "error",
       "message_fragments": [
         "Rust statement execution failed",
-        "invalid syntax"
+        "expression expected"
       ]
     }
   ]

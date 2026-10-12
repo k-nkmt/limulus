@@ -3,7 +3,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from .backend_matrix import build_session_payload
+import pyarrow as pa
+
+
+def _arrow_payload(payload: object) -> pa.Table:
+    if isinstance(payload, pa.Table):
+        return payload
+    if isinstance(payload, dict):
+        return pa.table(payload)
+    if isinstance(payload, list):
+        return pa.Table.from_pylist([dict(row) for row in payload])
+    raise TypeError(f"unsupported Arrow payload type: {type(payload)!r}")
 
 
 @dataclass(frozen=True)
@@ -71,10 +81,7 @@ SESSION_DATASET_ACCESS_CASES = (
             "run;"
         ),
         input_name="inp",
-        input_payload=build_session_payload(
-            "arrow_table",
-            {"id": [1, 2], "amount": [10, -5]},
-        ),
+        input_payload=_arrow_payload({"id": [1, 2], "amount": [10, -5]}),
         expected_output=[{"id": 1, "amount": 10}],
     ),
 )

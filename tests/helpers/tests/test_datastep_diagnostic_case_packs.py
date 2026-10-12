@@ -50,21 +50,16 @@ def _assert_expected_diagnostic(case: DataStepDiagnosticCase, expected: Diagnost
 
 @pytest.mark.parametrize("case", load_diagnostic_case_packs(CASE_ROOT), ids=lambda c: c.case_id)
 def test_diagnostic_case_packs_match_expected_diagnostics(case: DataStepDiagnosticCase) -> None:
-    backends = ["python", "rust"] if case.backend == "auto" else [case.backend]
+    executor = DataStepExecutor(runtime_backend="rust")
+    request_kwargs = {
+        "dsl_text": case.program_text,
+        "inputs": case.input_dataset_refs(),
+    }
+    if case.output_targets is not None:
+        request_kwargs["output_targets"] = case.output_targets
+    response = executor.execute(ExecuteRequest(**request_kwargs))
+    assert response.has_errors is True, f"case={case.case_id}, engine=rust: expected diagnostics"
+    assert response.diagnostics, f"case={case.case_id}, engine=rust: diagnostics should not be empty"
 
-    for backend in backends:
-        executor = DataStepExecutor(runtime_backend=backend, parser_backend="python")
-        request_kwargs = {
-            "dsl_text": case.program_text,
-            "inputs": case.input_dataset_refs(),
-        }
-        if case.output_targets is not None:
-            request_kwargs["output_targets"] = case.output_targets
-        response = executor.execute(
-            ExecuteRequest(**request_kwargs)
-        )
-        assert response.has_errors is True, f"case={case.case_id}, backend={backend}: expected diagnostics"
-        assert response.diagnostics, f"case={case.case_id}, backend={backend}: diagnostics should not be empty"
-
-        for expected in case.expected_diagnostics:
-            _assert_expected_diagnostic(case, expected, response.diagnostics)
+    for expected in case.expected_diagnostics:
+        _assert_expected_diagnostic(case, expected, response.diagnostics)

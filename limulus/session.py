@@ -6,6 +6,7 @@ points, and the dataset-scoped helper methods that are surfaced in the API docs.
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 import time
 from collections.abc import Iterable, Mapping, Sequence
@@ -29,11 +30,14 @@ from .column_api import (
 )
 from .execution import DataStepExecutor
 from .format_registry import FormatRegistry
+from .host_functions import HostFunctionContextCapture, capture_host_function_context
 from .session_parsing import classify_sql, parse_simple_filter, raise_session_sql_execution_error
 from .models import (
     DatasetCatalog,
     ExecuteRequest,
+    ExecuteResponse,
     LogEntry,
+    OutputConversionResult,
     SubmitResult,
 )
 
@@ -389,32 +393,31 @@ class Session:
         *,
         backend: str = "auto",
         runtime_backend: str | None = None,
-        parser_backend: str = "python",
         options: Mapping[str, Any] | None = None,
     ) -> None:
         """Creates a limulus execution session.
 
-        A session holds a dataset catalog and execution engine, sharing datasets
-        across multiple :meth:`submit` calls.
+        A session holds a dataset catalog and the Rust row execution engine,
+        sharing datasets across multiple :meth:`submit` calls.
 
         Args:
-            backend: Preferred backend. One of ``"auto"`` (recommended), ``"python"``, or ``"rust"``.
-                With ``"auto"``, limulus prefers the Rust runtime when the current workload is supported and falls back to Python otherwise.
-            runtime_backend: Explicit override for runtime selection. Takes precedence over ``backend``.
-            parser_backend: Parser backend. Currently only ``"python"`` (lark) is stable.
+            backend: Compatibility mode. One of ``"auto"`` (recommended), ``"python"``, or
+                ``"rust"``. All accepted modes select the Rust row strategy; ``"python"``
+                is retained as a legacy alias and never starts a Python row engine.
+            runtime_backend: Explicit compatibility-mode override. Takes precedence over
+                ``backend`` and is normalized to the same Rust row strategy.
             options: Session-level option dictionary. These attributes are currently reserved for
                 future use, but are propagated with each submit request.
 
         Examples:
             >>> import limulus
             >>> session = limulus.Session()
-            >>> session = limulus.Session(backend="python")
+            >>> session = limulus.Session(backend="rust")
         """
         selected_runtime_backend = runtime_backend or backend
         self._format_registry = FormatRegistry()
         self._executor = DataStepExecutor(
             runtime_backend=selected_runtime_backend,
-            parser_backend=parser_backend,
             format_registry=self._format_registry,
         )
         self._datasets = DatasetCatalog()
@@ -448,8 +451,14 @@ class Session:
         if self._is_dictionary_reserved_name(name):
             raise ValueError(f"Cannot overwrite dictionary table: {name}")
         dataset = self._to_registerable_dataset(data)
-        self._executor.register_tables({name: dataset})
-        self._datasets.set(name, self._to_arrow(dataset))
+        try:
+            table = self._to_arrow(dataset)
+        except ValueError:
+            raise
+        except Exception as error:
+            raise ValueError("Unsupported dataset type for Session.load") from error
+        self._executor.register_tables({name: table})
+        self._datasets.set(name, table)
 
     def loads(self, datasets: Mapping[str, Any] | None = None, **named_datasets: Any) -> None:
         """Registers multiple datasets at once.
@@ -521,6 +530,7 @@ class Session:
         *,
         backend: str | None = None,
         show_result: bool = False,
+        functions: object | None = None,
     ) -> SubmitResult:
         """Submits Data Step code to the session and executes it.
 
@@ -530,12 +540,17 @@ class Session:
         Args:
             code: Data Step DSL text to execute.
                 Multiple ``DATA ... RUN;`` blocks may be included.
-            backend: Optional runtime backend override for this call only.
-                One of ``"rust"``, ``"python"``, or ``"auto"``.
-                When given, temporarily overrides the session-level backend setting.
+            backend: Optional execution-mode override for this call only.
+                One of ``"rust"``, ``"python"``, or ``"auto"``. All modes select
+                the Rust row strategy; ``"python"`` is a compatibility alias.
+                The override applies to this submission only and travels in the
+                request; the session-level default backend is not modified.
             show_result: Controls notebook/REPL representation of the returned
                 :class:`~limulus.SubmitResult`. Defaults to ``False`` for
                 ``Session.submit()`` to keep successful calls quiet.
+            functions: Optional request-scoped mapping of function names to
+                callables used by ``apply``. Invalid mappings are rejected
+                before execution.
 
         Returns:
             A :class:`~limulus.SubmitResult`.
@@ -552,11 +567,56 @@ class Session:
             >>> print(session["result"].to_pandas())
         """
         started = time.perf_counter()
-        _original_backend: str | None = None
-        if backend is not None:
-            _original_backend = self._executor._runtime_backend_preference
-            self._executor.set_runtime_backend(backend)
+        frame = inspect.currentframe()
+        caller_frame = None
         try:
+            caller_frame = frame.f_back if frame is not None else None
+            caller_locals = dict(caller_frame.f_locals) if caller_frame is not None else {}
+            caller_globals = dict(caller_frame.f_globals) if caller_frame is not None else {}
+        finally:
+            # The request stores only copied callable values, never a frame.
+            del caller_frame
+            del frame
+        host_capture = capture_host_function_context(
+            caller_locals,
+            caller_globals,
+            functions=functions,
+        )
+        del caller_locals
+        del caller_globals
+        return self._submit_with_host_context(
+            code,
+            backend=backend,
+            show_result=show_result,
+            host_capture=host_capture,
+            started=started,
+        )
+
+    def _submit_with_host_context(
+        self,
+        code: str,
+        *,
+        backend: str | None,
+        show_result: bool,
+        host_capture: HostFunctionContextCapture,
+        started: float | None = None,
+    ) -> SubmitResult:
+        """Execute one request after its public caller context was captured.
+
+        ``submit`` and ``run`` both enter here so nested public calls cannot
+        capture a second, unrelated frame. Validation diagnostics are turned
+        into a failed ``SubmitResult`` without invoking the executor or
+        changing its default backend preference. A submit-scoped ``backend``
+        override travels in the request and never rewrites the executor
+        default, so concurrent submissions cannot leak one request's choice
+        into another or into the shared default.
+        """
+
+        started = time.perf_counter() if started is None else started
+        if host_capture.diagnostics:
+            response = ExecuteResponse(diagnostics=host_capture.diagnostics)
+            converted = OutputConversionResult()
+        else:
             request_options = dict(self._options)
             if self._format_registry.has_custom_registrations():
                 dispatch_hints = dict(request_options.get("dispatch_hints", {}) or {})
@@ -565,13 +625,17 @@ class Session:
                 format_catalog_payload = self._format_registry.catalog_payload()
                 if format_catalog_payload:
                     request_options["format_catalog_payload"] = format_catalog_payload
-            response = self._executor.execute(ExecuteRequest(dsl_text=code, options=request_options))
-        finally:
-            if backend is not None:
-                self._executor.set_runtime_backend(_original_backend)
-        elapsed_seq = (time.perf_counter() - started) 
+            response = self._executor.execute(
+                ExecuteRequest(
+                    dsl_text=code,
+                    options=request_options,
+                    host_function_context=host_capture.context,
+                    runtime_backend=backend,
+                )
+            )
+            converted = self._executor.convert_outputs(response, "arrow_table")
 
-        converted = self._executor.convert_outputs(response, "arrow_table")
+        elapsed_seq = time.perf_counter() - started
         self._datasets.update(converted.outputs)
         log_entries = tuple(
             LogEntry(
@@ -616,7 +680,7 @@ class Session:
             display_result=show_result,
         )
         self._last_submit_result = result
-        if not result.success:
+        if any(entry.severity in {"warning", "error"} for entry in result.log):
             result.print_log()
         return result
 
@@ -625,9 +689,33 @@ class Session:
         code: str,
         *,
         backend: str | None = None,
+        functions: object | None = None,
     ) -> SubmitResult:
         """Alias for :meth:`submit`."""
-        return self.submit(code, backend=backend)
+        started = time.perf_counter()
+        frame = inspect.currentframe()
+        caller_frame = None
+        try:
+            caller_frame = frame.f_back if frame is not None else None
+            caller_locals = dict(caller_frame.f_locals) if caller_frame is not None else {}
+            caller_globals = dict(caller_frame.f_globals) if caller_frame is not None else {}
+        finally:
+            del caller_frame
+            del frame
+        host_capture = capture_host_function_context(
+            caller_locals,
+            caller_globals,
+            functions=functions,
+        )
+        del caller_locals
+        del caller_globals
+        return self._submit_with_host_context(
+            code,
+            backend=backend,
+            show_result=False,
+            host_capture=host_capture,
+            started=started,
+        )
 
     @property
     def datasets(self) -> DatasetCatalog:

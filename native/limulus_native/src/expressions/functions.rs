@@ -4,9 +4,10 @@ use crate::expressions::{
     scalar_to_pyobject, scalar_to_text, scalar_to_time, ScalarValue,
 };
 use crate::runtime::EvalRuntimeState;
+use crate::row_view::LogicalRowAccess;
 use chrono::NaiveDate;
 use pyo3::prelude::*;
-use pyo3::types::{PyModule, PyTuple};
+use pyo3::types::PyTuple;
 use regex::{Regex, RegexBuilder};
 use std::collections::HashMap;
 
@@ -21,10 +22,10 @@ pub(crate) fn parse_width_precision(format_name: &str) -> Option<(usize, Option<
     Some((width, Some(precision)))
 }
 
-pub(crate) fn normalize_format_name(value: &ScalarValue) -> (String, bool) {
-    let raw = scalar_to_text(value).trim().to_ascii_lowercase();
+pub(crate) fn normalize_format_name(value: &ScalarValue) -> Result<(String, bool), String> {
+    let raw = scalar_to_text(value)?.trim().to_ascii_lowercase();
     let has_dot = raw.contains('.');
-    (raw.trim_end_matches('.').to_string(), has_dot)
+    Ok((raw.trim_end_matches('.').to_string(), has_dot))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,8 +34,8 @@ enum CatalogLookupState {
     PresentNoMatch,
 }
 
-fn normalize_custom_format_name(value: &ScalarValue) -> (String, bool, bool) {
-    let raw = scalar_to_text(value).trim().to_ascii_lowercase();
+fn normalize_custom_format_name(value: &ScalarValue) -> Result<(String, bool, bool), String> {
+    let raw = scalar_to_text(value)?.trim().to_ascii_lowercase();
     let has_dot = raw.contains('.');
     let is_character = raw.starts_with('$');
     let normalized = raw
@@ -42,7 +43,7 @@ fn normalize_custom_format_name(value: &ScalarValue) -> (String, bool, bool) {
         .unwrap_or(raw.as_str())
         .trim_end_matches('.')
         .to_string();
-    (normalized, has_dot, is_character)
+    Ok((normalized, has_dot, is_character))
 }
 
 fn lookup_put_catalog(
@@ -201,7 +202,7 @@ fn parse_time_text(text: &str) -> Result<chrono::NaiveTime, String> {
 }
 
 pub(crate) fn input_builtin(value: &ScalarValue, format_name: &str) -> Result<ScalarValue, String> {
-    let raw = scalar_to_text(value);
+    let raw = scalar_to_text(value)?;
     let text = raw.trim();
     if text.is_empty() {
         return Ok(ScalarValue::Null);
@@ -326,6 +327,94 @@ fn parse_prxchange_pattern(raw: &str) -> Result<(Regex, String), String> {
     Ok((compiled, replacement.to_string()))
 }
 
+// Unicode scalar position helpers.
+// Public string functions expose 1-based Unicode scalar positions and scalar counts;
+// UTF-8 byte offsets stay internal to slicing/search and must never reach public results.
+fn byte_offset_at_scalar(value: &str, zero_based_scalar: usize) -> usize {
+    value
+        .char_indices()
+        .nth(zero_based_scalar)
+        .map(|(byte_offset, _)| byte_offset)
+        .unwrap_or(value.len())
+}
+
+fn scalar_count_before_byte(value: &str, byte_offset: usize) -> Result<usize, String> {
+    if byte_offset > value.len() || !value.is_char_boundary(byte_offset) {
+        return Err(format!(
+            "byte offset {byte_offset} is not a char boundary of a {}-byte string",
+            value.len()
+        ));
+    }
+    Ok(value[..byte_offset].chars().count())
+}
+
+fn scalar_slice(value: &str, start: usize, length: Option<usize>) -> String {
+    let byte_start = byte_offset_at_scalar(value, start);
+    let byte_end = match length {
+        None => value.len(),
+        Some(length) => byte_offset_at_scalar(value, start.saturating_add(length)),
+    };
+    let end = byte_end.min(value.len());
+    if byte_start >= end {
+        return String::new();
+    }
+    value[byte_start..end].to_string()
+}
+
+fn find_scalar_position(
+    value: &str,
+    pattern: &str,
+    start: usize,
+    ignore_case: bool,
+) -> Result<Option<usize>, String> {
+    let scalar_total = value.chars().count();
+    if pattern.is_empty() {
+        return Ok(Some(start.min(scalar_total)));
+    }
+
+    if !ignore_case {
+        let byte_start = byte_offset_at_scalar(value, start);
+        if byte_start >= value.len() {
+            return Ok(None);
+        }
+        return match value[byte_start..].find(pattern) {
+            Some(relative) => {
+                let absolute = byte_start + relative;
+                Ok(Some(scalar_count_before_byte(value, absolute)?))
+            }
+            None => Ok(None),
+        };
+    }
+
+    // Case-insensitive search lowercases per-char and keeps a map from every
+    // lowercase scalar back to the original scalar ordinal it came from; chars
+    // whose lowercase expands to several scalars all map to the same ordinal.
+    // Match positions are never derived from lowercase-buffer byte offsets.
+    let mut lowered_value = String::with_capacity(value.len());
+    let mut lowered_origins: Vec<usize> = Vec::with_capacity(value.len());
+    let mut lowered_start_byte: Option<usize> = None;
+    for (ordinal, ch) in value.chars().enumerate() {
+        if ordinal >= start && lowered_start_byte.is_none() {
+            lowered_start_byte = Some(lowered_value.len());
+        }
+        for lowered in ch.to_lowercase() {
+            lowered_value.push(lowered);
+            lowered_origins.push(ordinal);
+        }
+    }
+    let lowered_pattern: String = pattern.chars().flat_map(char::to_lowercase).collect();
+    let lowered_start_byte = lowered_start_byte.unwrap_or(lowered_value.len());
+
+    match lowered_value[lowered_start_byte..].find(&lowered_pattern) {
+        Some(relative) => {
+            let absolute = lowered_start_byte + relative;
+            let lowered_ordinal = scalar_count_before_byte(&lowered_value, absolute)?;
+            Ok(lowered_origins.get(lowered_ordinal).copied())
+        }
+        None => Ok(None),
+    }
+}
+
 // Main function evaluation dispatch
 pub fn evaluate_function(
     py: Python<'_>,
@@ -333,48 +422,42 @@ pub fn evaluate_function(
     args: &[ScalarValue],
     state: &mut EvalRuntimeState,
 ) -> Result<ScalarValue, String> {
+    evaluate_function_with_context(py, name, args, &[], state)
+}
+
+pub(crate) fn evaluate_function_with_context(
+    py: Python<'_>,
+    name: &str,
+    args: &[ScalarValue],
+    argument_contexts: &[String],
+    state: &mut EvalRuntimeState,
+) -> Result<ScalarValue, String> {
     fn call_python_apply_target(
         py: Python<'_>,
         target: &Bound<'_, PyAny>,
         args: &[ScalarValue],
+        argument_contexts: &[String],
     ) -> Result<ScalarValue, String> {
         let py_args = args
             .iter()
-            .map(|arg| scalar_to_pyobject(py, arg))
+            .enumerate()
+            .map(|(index, arg)| {
+                scalar_to_pyobject(py, arg).map_err(|error| {
+                    let context = argument_contexts
+                        .get(index)
+                        .map(String::as_str)
+                        .filter(|value| !value.is_empty())
+                        .unwrap_or("argument");
+                    format!(
+                        "apply() argument {index} ({context}) could not cross the Python boundary: {error}"
+                    )
+                })
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let tuple = PyTuple::new(py, py_args.iter().map(|item| item.bind(py))).map_err(|error| error.to_string())?;
         let result = target.call1(tuple).map_err(|error| error.to_string())?;
-        py_to_scalar(&result).map_err(|error| error.to_string())
-    }
-
-    fn resolve_python_apply_target(
-        py: Python<'_>,
-        state: &EvalRuntimeState,
-        function_name: &str,
-    ) -> Result<Option<Py<PyAny>>, String> {
-        if let Some(target) = state.apply_registry.get(function_name) {
-            return Ok(Some(target.clone_ref(py)));
-        }
-
-        let builtins = PyModule::import(py, "builtins").map_err(|error| error.to_string())?;
-        if let Ok(target) = builtins.getattr(function_name) {
-            return Ok(Some(target.unbind()));
-        }
-
-        if let Some((module_path, attr_name)) = function_name.rsplit_once('.') {
-            let importlib = PyModule::import(py, "importlib").map_err(|error| error.to_string())?;
-            let module = importlib
-                .getattr("import_module")
-                .map_err(|error| error.to_string())?
-                .call1((module_path,));
-            if let Ok(module) = module {
-                if let Ok(target) = module.getattr(attr_name) {
-                    return Ok(Some(target.unbind()));
-                }
-            }
-        }
-
-        Ok(None)
+        py_to_scalar(&result)
+            .map_err(|error| format!("apply() result conversion failed: {error}"))
     }
 
     fn parse_steps(raw: Option<&ScalarValue>, default_value: isize) -> Result<isize, String> {
@@ -402,21 +485,40 @@ pub fn evaluate_function(
         steps: isize,
         default: ScalarValue,
     ) -> Result<ScalarValue, String> {
-        let Some(cursor) = state.source_cursor.as_ref() else {
-            return Ok(default);
-        };
         let target_index = state.row_index + steps;
-        if target_index < 0 || (target_index as usize) >= cursor.row_count() {
+        let logical_row = state
+            .logical_row
+            .as_ref()
+            .ok_or_else(|| "logical row view is required for shift() variable lookup".to_string())?;
+        if target_index < 0 || (target_index as usize) >= logical_row.row_count() {
             return Ok(default);
         }
 
-        let value = cursor
-            .source_value_by_name(target_index as usize, variable_name)
+        let target_row = logical_row
+            .for_row_index(target_index as usize)
             .map_err(|error| error.to_string())?;
-        let Some(value) = value else {
+        let Some(value) = target_row
+            .resolve(variable_name)
+            .map_err(|error| error.to_string())?
+        else {
             return Ok(default.clone());
         };
-        Ok(value.to_owned_value().into_scalar_value())
+        match value {
+            crate::row_view::ResolvedValue::SourceScalar(value) => {
+                Ok(value.as_scalar().map_err(|error| error.to_string())?.clone())
+            }
+            crate::row_view::ResolvedValue::SourceCell(cell) => Err(format!(
+                "complex access is unsupported for column '{variable_name}' during shift(): {}",
+                cell.access_error("shift()")
+            )),
+            crate::row_view::ResolvedValue::Owned(value)
+            | crate::row_view::ResolvedValue::Automatic(value) => Ok(
+                value
+                    .as_scalar()
+                    .map_err(|error| error.to_string())?
+                    .clone(),
+            ),
+        }
     }
 
     fn shift_value_queue(
@@ -480,19 +582,19 @@ pub fn evaluate_function(
             if args.len() != 2 {
                 return Err("put() expects 2 arguments".to_string());
             }
-            let (format_name, has_dot, is_character) = normalize_custom_format_name(&args[1]);
+            let (format_name, has_dot, is_character) = normalize_custom_format_name(&args[1])?;
             match lookup_put_catalog(state, &format_name, is_character, &args[0]) {
                 Ok(value) => return Ok(value),
                 Err(CatalogLookupState::PresentNoMatch) => {
-                    return Ok(ScalarValue::Text(scalar_to_text(&args[0])));
+                    return Ok(ScalarValue::Text(scalar_to_text(&args[0])?));
                 }
                 Err(CatalogLookupState::Absent) => {}
             }
             if is_character {
-                return Err(format!("Unsupported format: {}", scalar_to_text(&args[1])));
+                return Err(format!("Unsupported format: {}", scalar_to_text(&args[1])?));
             }
             if requires_numeric_format_dot(&format_name, has_dot) {
-                return Err(format!("Unsupported format: {}", scalar_to_text(&args[1])));
+                return Err(format!("Unsupported format: {}", scalar_to_text(&args[1])?));
             }
             put_builtin(&args[0], &format_name)
         }
@@ -500,7 +602,7 @@ pub fn evaluate_function(
             if args.len() != 2 {
                 return Err("input() expects 2 arguments".to_string());
             }
-            let (format_name, _) = normalize_format_name(&args[1]);
+            let (format_name, _) = normalize_format_name(&args[1])?;
             match lookup_input_catalog(state, &format_name, &args[0]) {
                 Ok(value) => return Ok(value),
                 Err(CatalogLookupState::PresentNoMatch) => return Ok(ScalarValue::Null),
@@ -518,27 +620,24 @@ pub fn evaluate_function(
             if args.len() < 2 || args.len() > 3 {
                 return Err("substr() expects 2 or 3 arguments".to_string());
             }
-            let source = scalar_to_text(&args[0]);
+            let source = scalar_to_text(&args[0])?;
             let start_index = scalar_to_number(&args[1])? as isize - 1;
             let start = start_index.max(0) as usize;
-            if start >= source.len() {
-                return Ok(ScalarValue::Text("".to_string()));
-            }
-            if args.len() == 2 {
-                return Ok(ScalarValue::Text(source[start..].to_string()));
-            }
-            let length = scalar_to_number(&args[2])?.max(0.0) as usize;
-            let end = (start + length).min(source.len());
-            Ok(ScalarValue::Text(source[start..end].to_string()))
+            let length = if args.len() == 3 {
+                Some(scalar_to_number(&args[2])?.max(0.0) as usize)
+            } else {
+                None
+            };
+            Ok(ScalarValue::Text(scalar_slice(&source, start, length)))
         }
         "scan" => {
             if args.len() < 2 || args.len() > 3 {
                 return Err("scan() expects 2 or 3 arguments".to_string());
             }
-            let source = scalar_to_text(&args[0]);
+            let source = scalar_to_text(&args[0])?;
             let index = scalar_to_number(&args[1])? as isize - 1;
             let delimiters = if args.len() == 3 {
-                scalar_to_text(&args[2])
+                scalar_to_text(&args[2])?
             } else {
                 " ".to_string()
             };
@@ -555,11 +654,11 @@ pub fn evaluate_function(
             if args.is_empty() || args.len() > 2 {
                 return Err("compress() expects 1 or 2 arguments".to_string());
             }
-            let source = scalar_to_text(&args[0]);
+            let source = scalar_to_text(&args[0])?;
             if args.len() == 1 {
                 return Ok(ScalarValue::Text(source.chars().filter(|ch| !ch.is_whitespace()).collect()));
             }
-            let remove_chars = scalar_to_text(&args[1]);
+            let remove_chars = scalar_to_text(&args[1])?;
             Ok(ScalarValue::Text(
                 source
                     .chars()
@@ -571,19 +670,19 @@ pub fn evaluate_function(
             if args.len() != 1 {
                 return Err("trim() expects 1 argument".to_string());
             }
-            Ok(ScalarValue::Text(scalar_to_text(&args[0]).trim().to_string()))
+            Ok(ScalarValue::Text(scalar_to_text(&args[0])?.trim().to_string()))
         }
         "upcase" => {
             if args.len() != 1 {
                 return Err("upcase() expects 1 argument".to_string());
             }
-            Ok(ScalarValue::Text(scalar_to_text(&args[0]).to_uppercase()))
+            Ok(ScalarValue::Text(scalar_to_text(&args[0])?.to_uppercase()))
         }
         "lowcase" => {
             if args.len() != 1 {
                 return Err("lowcase() expects 1 argument".to_string());
             }
-            Ok(ScalarValue::Text(scalar_to_text(&args[0]).to_lowercase()))
+            Ok(ScalarValue::Text(scalar_to_text(&args[0])?.to_lowercase()))
         }
         "abs" => {
             if args.len() != 1 {
@@ -621,6 +720,13 @@ pub fn evaluate_function(
             if args.len() != 2 {
                 return Err("pow() expects 2 arguments".to_string());
             }
+            // The bridge normalizes `var ** lit` assignments to pow(var, lit),
+            // so this builtin must keep the binary-arithmetic NULL guard of
+            // BinaryOp::Pow: a NULL operand propagates as NULL instead of
+            // silently folding to 0 through numeric coercion.
+            if matches!(args[0], ScalarValue::Null) || matches!(args[1], ScalarValue::Null) {
+                return Ok(ScalarValue::Null);
+            }
             let base = scalar_to_number(&args[0])?;
             let exponent = scalar_to_number(&args[1])?;
             Ok(ScalarValue::Number(base.powf(exponent)))
@@ -628,6 +734,11 @@ pub fn evaluate_function(
         "mod" => {
             if args.len() != 2 {
                 return Err("mod() expects 2 arguments".to_string());
+            }
+            // `mod(x, y)` is the function spelling of the binary Mod
+            // operator, so it shares the same NULL-propagation boundary.
+            if matches!(args[0], ScalarValue::Null) || matches!(args[1], ScalarValue::Null) {
+                return Ok(ScalarValue::Null);
             }
             let left = scalar_to_number(&args[0])?;
             let right = scalar_to_number(&args[1])?;
@@ -706,7 +817,7 @@ pub fn evaluate_function(
             if args.is_empty() || args.len() > 3 {
                 return Err("lead() expects 1 to 3 arguments".to_string());
             }
-            let variable_name = scalar_to_text(&args[0]);
+            let variable_name = scalar_to_text(&args[0])?;
             let offset = parse_steps(args.get(1), 1)?;
             if offset < 1 {
                 return Err("lead() offset must be >= 1".to_string());
@@ -729,24 +840,16 @@ pub fn evaluate_function(
                 return Err("apply() expects at least 1 argument".to_string());
             }
 
-            let function_name = scalar_to_text(&args[0]);
+            let function_name = scalar_to_text(&args[0])?;
             let apply_args = &args[1..];
-            if !function_name.eq_ignore_ascii_case("apply") {
-                match evaluate_function(py, &function_name, apply_args, state) {
-                    Ok(value) => return Ok(value),
-                    Err(error) if error == format!("unsupported function: {function_name}") => {}
-                    Err(error) => return Err(error),
-                }
-            }
-
-            let Some(target) = resolve_python_apply_target(py, state, &function_name)? else {
+            let Some(target) = state.apply_registry.get(&function_name) else {
                 return Err(format!("Unknown apply function: {function_name}"));
             };
             let target = target.bind(py);
             if !target.is_callable() {
                 return Err(format!("Resolved apply target is not callable: {function_name}"));
             }
-            call_python_apply_target(py, &target, apply_args)
+            call_python_apply_target(py, &target, apply_args, argument_contexts)
         }
         "mdy" => {
             if args.len() != 3 {
@@ -770,7 +873,7 @@ pub fn evaluate_function(
             if args.len() != 3 {
                 return Err("intck() expects 3 arguments".to_string());
             }
-            let interval = scalar_to_text(&args[0]).to_lowercase();
+            let interval = scalar_to_text(&args[0])?.to_lowercase();
             let start = scalar_to_date(&args[1])?;
             let end = scalar_to_date(&args[2])?;
             let value = match interval.as_str() {
@@ -785,7 +888,7 @@ pub fn evaluate_function(
             if args.len() != 1 {
                 return Err("propcase() expects 1 argument".to_string());
             }
-            let source = scalar_to_text(&args[0]);
+            let source = scalar_to_text(&args[0])?;
             let result: String = source
                 .split_inclusive(char::is_whitespace)
                 .map(|word| {
@@ -802,74 +905,78 @@ pub fn evaluate_function(
             Ok(ScalarValue::Text(result))
         }
         "__dsl_concat__" | "cat" => {
-            let result: String = args.iter().map(scalar_to_text).collect();
+            let result = args.iter().try_fold(String::new(), |mut result, arg| {
+                result.push_str(&scalar_to_text(arg)?);
+                Ok::<_, String>(result)
+            })?;
             Ok(ScalarValue::Text(result))
         }
         "cats" => {
-            let result: String = args.iter().map(|arg| scalar_to_text(arg).trim().to_string()).collect();
+            let result = args
+                .iter()
+                .map(|arg| scalar_to_text(arg).map(|value| value.trim().to_string()))
+                .collect::<Result<Vec<_>, _>>()?
+                .concat();
             Ok(ScalarValue::Text(result))
         }
         "catt" => {
-            let result: String = args.iter().map(|arg| scalar_to_text(arg).trim_end().to_string()).collect();
+            let result = args
+                .iter()
+                .map(|arg| scalar_to_text(arg).map(|value| value.trim_end().to_string()))
+                .collect::<Result<Vec<_>, _>>()?
+                .concat();
             Ok(ScalarValue::Text(result))
         }
         "catx" => {
             if args.is_empty() {
                 return Err("catx() expects at least 1 argument".to_string());
             }
-            let delimiter = scalar_to_text(&args[0]);
-            let parts: Vec<String> = args[1..]
-                .iter()
-                .filter_map(|arg| {
-                    if scalar_is_missing(arg) {
-                        return None;
-                    }
-                    let trimmed = scalar_to_text(arg).trim().to_string();
-                    if trimmed.is_empty() {
-                        None
-                    } else {
-                        Some(trimmed)
-                    }
-                })
-                .collect();
+            let delimiter = scalar_to_text(&args[0])?;
+            let mut parts = Vec::new();
+            for arg in &args[1..] {
+                if scalar_is_missing(arg) {
+                    continue;
+                }
+                let trimmed = scalar_to_text(arg)?.trim().to_string();
+                if !trimmed.is_empty() {
+                    parts.push(trimmed);
+                }
+            }
             Ok(ScalarValue::Text(parts.join(&delimiter)))
         }
         "index" => {
             if args.len() != 2 {
                 return Err("index() expects 2 arguments".to_string());
             }
-            let source = scalar_to_text(&args[0]);
-            let excerpt = scalar_to_text(&args[1]);
+            let source = scalar_to_text(&args[0])?;
+            let excerpt = scalar_to_text(&args[1])?;
             if excerpt.is_empty() {
                 return Ok(ScalarValue::Number(1.0));
             }
-            match source.find(&excerpt) {
-                Some(pos) => Ok(ScalarValue::Number((pos + 1) as f64)),
+            match find_scalar_position(&source, &excerpt, 0, false)? {
+                Some(ordinal) => Ok(ScalarValue::Number((ordinal + 1) as f64)),
                 None => Ok(ScalarValue::Number(0.0)),
             }
         }
         "find" => {
-            if args.is_empty() || args.len() > 4 {
+            if args.len() < 2 || args.len() > 4 {
                 return Err("find() expects 2 to 4 arguments".to_string());
             }
-            let mut source = scalar_to_text(&args[0]);
-            let mut excerpt = scalar_to_text(&args[1]);
+            let source = scalar_to_text(&args[0])?;
+            let excerpt = scalar_to_text(&args[1])?;
             let start_index = if args.len() >= 3 {
                 (scalar_to_number(&args[2])? as isize - 1).max(0) as usize
             } else {
                 0
             };
             let modifiers = if args.len() >= 4 {
-                scalar_to_text(&args[3]).to_lowercase()
+                scalar_to_text(&args[3])?.to_lowercase()
             } else {
                 String::new()
             };
-            if modifiers.contains('i') {
-                source = source.to_lowercase();
-                excerpt = excerpt.to_lowercase();
-            }
-            match source[start_index..].find(&excerpt) {
-                Some(pos) => Ok(ScalarValue::Number((start_index + pos + 1) as f64)),
+            let ignore_case = modifiers.contains('i');
+            match find_scalar_position(&source, &excerpt, start_index, ignore_case)? {
+                Some(ordinal) => Ok(ScalarValue::Number((ordinal + 1) as f64)),
                 None => Ok(ScalarValue::Number(0.0)),
             }
         }
@@ -877,18 +984,18 @@ pub fn evaluate_function(
             if args.len() != 3 {
                 return Err("tranwrd() expects 3 arguments".to_string());
             }
-            let source = scalar_to_text(&args[0]);
-            let target = scalar_to_text(&args[1]);
-            let replacement = scalar_to_text(&args[2]);
+            let source = scalar_to_text(&args[0])?;
+            let target = scalar_to_text(&args[1])?;
+            let replacement = scalar_to_text(&args[2])?;
             Ok(ScalarValue::Text(source.replace(&target, &replacement)))
         }
         "translate" => {
             if args.len() != 3 {
                 return Err("translate() expects 3 arguments".to_string());
             }
-            let source = scalar_to_text(&args[0]);
-            let to_chars: Vec<char> = scalar_to_text(&args[1]).chars().collect();
-            let from_chars: Vec<char> = scalar_to_text(&args[2]).chars().collect();
+            let source = scalar_to_text(&args[0])?;
+            let to_chars: Vec<char> = scalar_to_text(&args[1])?.chars().collect();
+            let from_chars: Vec<char> = scalar_to_text(&args[2])?.chars().collect();
             let mut map: HashMap<char, String> = HashMap::new();
             for (index, src_char) in from_chars.iter().enumerate() {
                 map.insert(
@@ -910,38 +1017,34 @@ pub fn evaluate_function(
             if args.len() != 1 {
                 return Err("length() expects 1 argument".to_string());
             }
-            let source = scalar_to_text(&args[0]);
-            Ok(ScalarValue::Number(source.len() as f64))
+            let source = scalar_to_text(&args[0])?;
+            Ok(ScalarValue::Number(source.chars().count() as f64))
         }
         "lengthn" => {
             if args.len() != 1 {
                 return Err("lengthn() expects 1 argument".to_string());
             }
-            let source = scalar_to_text(&args[0]);
-            if source.is_empty() {
-                Ok(ScalarValue::Number(0.0))
-            } else {
-                Ok(ScalarValue::Number(source.len() as f64))
-            }
+            let source = scalar_to_text(&args[0])?;
+            Ok(ScalarValue::Number(source.chars().count() as f64))
         }
         "strip" => {
             if args.len() != 1 {
                 return Err("strip() expects 1 argument".to_string());
             }
-            Ok(ScalarValue::Text(scalar_to_text(&args[0]).trim().to_string()))
+            Ok(ScalarValue::Text(scalar_to_text(&args[0])?.trim().to_string()))
         }
         "reverse" => {
             if args.len() != 1 {
                 return Err("reverse() expects 1 argument".to_string());
             }
-            let source = scalar_to_text(&args[0]);
+            let source = scalar_to_text(&args[0])?;
             Ok(ScalarValue::Text(source.chars().rev().collect()))
         }
         "repeat" => {
             if args.len() != 2 {
                 return Err("repeat() expects 2 arguments".to_string());
             }
-            let source = scalar_to_text(&args[0]);
+            let source = scalar_to_text(&args[0])?;
             let count = scalar_to_number(&args[1])?.max(0.0) as usize;
             Ok(ScalarValue::Text(source.repeat(count)))
         }
@@ -949,9 +1052,9 @@ pub fn evaluate_function(
             if args.is_empty() || args.len() > 2 {
                 return Err("countw() expects 1 or 2 arguments".to_string());
             }
-            let source = scalar_to_text(&args[0]).trim().to_string();
+            let source = scalar_to_text(&args[0])?.trim().to_string();
             let delimiters = if args.len() == 2 {
-                scalar_to_text(&args[1])
+                scalar_to_text(&args[1])?
             } else {
                 " ".to_string()
             };
@@ -1032,11 +1135,14 @@ pub fn evaluate_function(
             if args.len() != 2 {
                 return Err("prxmatch() expects 2 arguments".to_string());
             }
-            let pattern_raw = scalar_to_text(&args[0]);
-            let source = scalar_to_text(&args[1]);
+            let pattern_raw = scalar_to_text(&args[0])?;
+            let source = scalar_to_text(&args[1])?;
             let regex = compile_prx_pattern(&pattern_raw)?;
             match regex.find(&source) {
-                Some(found) => Ok(ScalarValue::Number((found.start() + 1) as f64)),
+                Some(found) => {
+                    let ordinal = scalar_count_before_byte(&source, found.start())?;
+                    Ok(ScalarValue::Number((ordinal + 1) as f64))
+                }
                 None => Ok(ScalarValue::Number(0.0)),
             }
         }
@@ -1044,9 +1150,9 @@ pub fn evaluate_function(
             if args.len() != 3 {
                 return Err("prxchange() expects 3 arguments".to_string());
             }
-            let pattern_raw = scalar_to_text(&args[0]);
+            let pattern_raw = scalar_to_text(&args[0])?;
             let times = scalar_to_number(&args[1])? as isize;
-            let source = scalar_to_text(&args[2]);
+            let source = scalar_to_text(&args[2])?;
             let (regex, replacement) = parse_prxchange_pattern(&pattern_raw)?;
             if times <= 0 {
                 return Ok(ScalarValue::Text(regex.replace_all(&source, replacement.as_str()).into_owned()));
@@ -1065,5 +1171,257 @@ pub fn evaluate_function(
             Ok(ScalarValue::Text(result))
         }
         _ => Err(format!("unsupported function: {name}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        byte_offset_at_scalar, evaluate_function, find_scalar_position, scalar_count_before_byte,
+        scalar_slice,
+    };
+    use crate::expressions::ScalarValue;
+    use crate::runtime::EvalRuntimeState;
+
+    const ZWJ_FAMILY: &str = "👨‍👩‍👧‍👦";
+    const JP_FLAG: &str = "🇯🇵";
+
+    fn evaluate(name: &str, args: &[ScalarValue]) -> Result<ScalarValue, String> {
+        pyo3::Python::attach(|py| {
+            let mut state = EvalRuntimeState::default();
+            evaluate_function(py, name, args, &mut state)
+        })
+    }
+
+    fn text_arg(value: &str) -> ScalarValue {
+        ScalarValue::Text(value.to_string())
+    }
+
+    fn number_arg(value: f64) -> ScalarValue {
+        ScalarValue::Number(value)
+    }
+
+    fn assert_text(name: &str, args: &[ScalarValue], expected: &str) {
+        match evaluate(name, args) {
+            Ok(ScalarValue::Text(value)) => assert_eq!(value, expected),
+            other => panic!("{name}{args:?} returned {other:?}, expected text {expected:?}"),
+        }
+    }
+
+    fn assert_number(name: &str, args: &[ScalarValue], expected: f64) {
+        match evaluate(name, args) {
+            Ok(ScalarValue::Number(value)) => assert_eq!(value, expected),
+            other => panic!("{name}{args:?} returned {other:?}, expected number {expected:?}"),
+        }
+    }
+
+    fn assert_error_without_panic(name: &str, args: &[ScalarValue]) {
+        let error = evaluate(name, args)
+            .err()
+            .unwrap_or_else(|| panic!("{name}{args:?} unexpectedly succeeded"));
+        assert!(!error.is_empty(), "{name}{args:?} returned an empty error");
+    }
+
+    #[test]
+    fn substr_ascii_scalar_positions() {
+        assert_text("substr", &[text_arg("abc"), number_arg(2.0)], "bc");
+        assert_text("substr", &[text_arg("abc"), number_arg(2.0), number_arg(1.0)], "b");
+        assert_text("substr", &[text_arg("abc"), number_arg(-3.0)], "abc");
+    }
+
+    #[test]
+    fn substr_cjk_scalar_positions() {
+        assert_text("substr", &[text_arg("日本語"), number_arg(2.0)], "本語");
+        assert_text("substr", &[text_arg("日本語"), number_arg(2.0), number_arg(1.0)], "本");
+    }
+
+    #[test]
+    fn substr_and_length_treat_precomposed_and_decomposed_accents_as_written() {
+        assert_number("length", &[text_arg("café")], 4.0);
+        assert_text("substr", &[text_arg("café"), number_arg(4.0)], "é");
+
+        let decomposed = "cafe\u{0301}";
+        assert_number("length", &[text_arg(decomposed)], 5.0);
+        assert_text("substr", &[text_arg(decomposed), number_arg(5.0)], "\u{0301}");
+    }
+
+    #[test]
+    fn length_and_lengthn_count_unicode_scalars_not_bytes() {
+        assert_number("length", &[text_arg("abc")], 3.0);
+        assert_number("length", &[text_arg("日本語")], 3.0);
+        assert_number("lengthn", &[text_arg("日本語")], 3.0);
+        assert_number("length", &[text_arg("")], 0.0);
+        assert_number("lengthn", &[text_arg("")], 0.0);
+    }
+
+    #[test]
+    fn substr_counts_multi_scalar_emoji_and_flag_inputs_individually() {
+        assert_number("length", &[text_arg(ZWJ_FAMILY)], 7.0);
+        assert_text("substr", &[text_arg(ZWJ_FAMILY), number_arg(3.0), number_arg(1.0)], "👩");
+
+        assert_number("length", &[text_arg(JP_FLAG)], 2.0);
+        assert_text("substr", &[text_arg(JP_FLAG), number_arg(2.0), number_arg(1.0)], "\u{1F1F5}");
+    }
+
+    #[test]
+    fn substr_out_of_range_start_and_oversized_length_stay_bounded() {
+        assert_text("substr", &[text_arg("日本語"), number_arg(99.0)], "");
+        assert_text("substr", &[text_arg("日本語"), number_arg(2.0), number_arg(999.0)], "本語");
+    }
+
+    #[test]
+    fn substr_negative_length_is_empty() {
+        assert_text("substr", &[text_arg("abc"), number_arg(1.0), number_arg(-5.0)], "");
+    }
+
+    #[test]
+    fn string_function_arity_errors_do_not_panic() {
+        assert_error_without_panic("substr", &[text_arg("a")]);
+        assert_error_without_panic("substr", &[
+            text_arg("a"),
+            number_arg(1.0),
+            number_arg(2.0),
+            number_arg(3.0),
+        ]);
+        assert_error_without_panic("length", &[]);
+        assert_error_without_panic("length", &[text_arg("a"), text_arg("b")]);
+        assert_error_without_panic("lengthn", &[]);
+        assert_error_without_panic("lengthn", &[text_arg("a"), text_arg("b")]);
+    }
+
+    #[test]
+    fn scalar_helpers_agree_on_scalar_and_byte_boundaries() {
+        assert_eq!(byte_offset_at_scalar("日本語", 0), 0);
+        assert_eq!(byte_offset_at_scalar("日本語", 1), 3);
+        assert_eq!(byte_offset_at_scalar("日本語", 3), 9);
+        assert_eq!(byte_offset_at_scalar("日本語", 99), 9);
+
+        assert_eq!(scalar_count_before_byte("日本語", 0).unwrap(), 0);
+        assert_eq!(scalar_count_before_byte("日本語", 3).unwrap(), 1);
+        assert_eq!(scalar_count_before_byte("日本語", 9).unwrap(), 3);
+        assert!(scalar_count_before_byte("日本語", 1).is_err());
+        assert!(scalar_count_before_byte("日本語", 10).is_err());
+
+        assert_eq!(scalar_slice("日本語", 1, Some(1)), "本");
+        assert_eq!(scalar_slice("日本語", 1, None), "本語");
+        assert_eq!(scalar_slice("日本語", 5, None), "");
+        assert_eq!(scalar_slice("日本語", 0, Some(0)), "");
+    }
+
+    #[test]
+    fn find_scalar_position_maps_matches_to_original_scalar_ordinals() {
+        assert_eq!(find_scalar_position("日本語のテキスト", "の", 0, false).unwrap(), Some(3));
+        assert_eq!(find_scalar_position("日本語", "本", 1, false).unwrap(), Some(1));
+        assert_eq!(find_scalar_position("日本語", "本", 99, false).unwrap(), None);
+        assert_eq!(find_scalar_position("日本語", "", 1, false).unwrap(), Some(1));
+        assert_eq!(find_scalar_position("日本ABC語", "abc", 0, true).unwrap(), Some(2));
+        assert_eq!(find_scalar_position("İXİy", "İy", 0, true).unwrap(), Some(2));
+    }
+
+    #[test]
+    fn find_and_index_return_one_based_scalar_positions() {
+        assert_number("find", &[text_arg("日本語のテキスト"), text_arg("テキスト")], 5.0);
+        assert_number("index", &[text_arg("日本語のテキスト"), text_arg("の")], 4.0);
+    }
+
+    #[test]
+    fn find_start_position_is_a_scalar_ordinal_and_stays_bounded() {
+        assert_number("find", &[text_arg("日本語"), text_arg("本"), number_arg(1.0)], 2.0);
+        // start is inclusive: scalar position 2 is '本' itself, so the match is at 2.
+        assert_number("find", &[text_arg("日本語"), text_arg("本"), number_arg(2.0)], 2.0);
+        // No match at or after the start keeps the existing non-match 0 contract.
+        assert_number("find", &[text_arg("日本語"), text_arg("日"), number_arg(2.0)], 0.0);
+        assert_number("find", &[text_arg("日本語"), text_arg("本"), number_arg(99.0)], 0.0);
+    }
+
+    #[test]
+    fn find_case_insensitive_positions_map_to_original_scalars() {
+        assert_number(
+            "find",
+            &[text_arg("日本ABC語"), text_arg("abc"), number_arg(1.0), text_arg("i")],
+            3.0,
+        );
+        // 'İ' (U+0130) lowers to two scalars ('i' + U+0307) in both the source and
+        // the excerpt; the reported position must be the matched İ's scalar ordinal
+        // in the original string, never a lowercase-buffer index.
+        assert_number(
+            "find",
+            &[text_arg("İXİy"), text_arg("İy"), number_arg(1.0), text_arg("i")],
+            3.0,
+        );
+        assert_number(
+            "find",
+            &[text_arg("İXy"), text_arg("xy"), number_arg(1.0), text_arg("i")],
+            2.0,
+        );
+    }
+
+    #[test]
+    fn prxmatch_reports_scalar_positions() {
+        assert_number("prxmatch", &[text_arg("/テキスト/"), text_arg("日本語のテキスト")], 5.0);
+        assert_number("prxmatch", &[text_arg("/ZZZ/"), text_arg("日本語")], 0.0);
+    }
+
+    #[test]
+    fn string_search_compares_stored_scalars_without_normalization() {
+        assert_number("find", &[text_arg("cafe\u{0301}"), text_arg("café")], 0.0);
+        assert_number("index", &[text_arg("café"), text_arg("e\u{0301}")], 0.0);
+    }
+
+    #[test]
+    fn empty_excerpt_keeps_existing_position_contracts() {
+        assert_number("index", &[text_arg("日本語"), text_arg("")], 1.0);
+        assert_number("find", &[text_arg("日本語"), text_arg(""), number_arg(2.0)], 2.0);
+    }
+
+    #[test]
+    fn search_function_arity_errors_do_not_panic() {
+        assert_error_without_panic("find", &[text_arg("a")]);
+        assert_error_without_panic("find", &[
+            text_arg("a"),
+            text_arg("b"),
+            number_arg(1.0),
+            text_arg("i"),
+            number_arg(1.0),
+        ]);
+        assert_error_without_panic("index", &[text_arg("a")]);
+        assert_error_without_panic("prxmatch", &[text_arg("a")]);
+    }
+
+    #[test]
+    fn pow_propagates_null_before_numeric_coercion() {
+        // The bridge rewrites `var ** lit` assignments to pow(var, lit), so the
+        // builtin must keep the binary-arithmetic NULL guard of BinaryOp::Pow:
+        // a NULL operand propagates as NULL, and non-NULL operands keep the
+        // existing checked-coercion results.
+        assert_number("pow", &[number_arg(2.0), number_arg(3.0)], 8.0);
+        assert_number("pow", &[number_arg(7.0), number_arg(2.0)], 49.0);
+
+        for args in [
+            vec![ScalarValue::Null, number_arg(2.0)],
+            vec![number_arg(2.0), ScalarValue::Null],
+            vec![ScalarValue::Null, ScalarValue::Null],
+        ] {
+            match evaluate("pow", &args) {
+                Ok(ScalarValue::Null) => {}
+                other => panic!("pow({args:?}) returned {other:?}, expected NULL"),
+            }
+        }
+    }
+
+    #[test]
+    fn mod_function_propagates_null_before_numeric_coercion() {
+        assert_number("mod", &[number_arg(5.0), number_arg(3.0)], 2.0);
+
+        for args in [
+            vec![ScalarValue::Null, number_arg(3.0)],
+            vec![number_arg(3.0), ScalarValue::Null],
+            vec![ScalarValue::Null, ScalarValue::Null],
+        ] {
+            match evaluate("mod", &args) {
+                Ok(ScalarValue::Null) => {}
+                other => panic!("mod({args:?}) returned {other:?}, expected NULL"),
+            }
+        }
     }
 }

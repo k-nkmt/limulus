@@ -11,7 +11,6 @@
     },
     {
       "case_id": "array_star_dimension_index_access",
-      "backend": "auto",
       "program": "programs/array_star_dimension_index_access.txt",
       "inputs": {
         "inp": "inputs/array_star_dimension_index_access.inp.json"

@@ -10,14 +10,6 @@
       "expected": "expected/output_dataset_options_multi_target.json"
     },
     {
-      "case_id": "output_dataset_options_python_runtime",
-      "program": "programs/output_dataset_options_python_runtime.txt",
-      "inputs": {
-        "inp": "inputs/output_dataset_options_python_runtime.inp.json"
-      },
-      "expected": "expected/output_dataset_options_python_runtime.json"
-    },
-    {
       "case_id": "output_e2e_multi_output",
       "program": "programs/output_e2e_multi_output.txt",
       "inputs": {

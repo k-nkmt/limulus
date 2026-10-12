@@ -1,15 +1,20 @@
 from __future__ import annotations
 
-from .parser import ParserService, SplitStageParserService
+from typing import Any
+
+from .syntax.compat import block_display_slices, project_block_displays
+
+__all__ = ["DataStepBlockSplitter"]
 
 
-def _extend_statement_end(dsl_text: str, end: int) -> int:
-    cursor = end
-    while cursor < len(dsl_text) and dsl_text[cursor].isspace():
-        cursor += 1
-    if cursor < len(dsl_text) and dsl_text[cursor] == ";":
-        return cursor + 1
-    return end
+def _new_program_frontend() -> Any | None:
+    """One pure program frontend, or ``None`` when Lark is unavailable."""
+
+    try:
+        from .syntax.program import LarkProgramFrontend
+    except Exception:  # pragma: no cover - lark-free cold import
+        return None
+    return LarkProgramFrontend()
 
 
 def _split_blocks_from_regions(dsl_text: str, statement_regions) -> tuple[str, ...]:
@@ -43,44 +48,69 @@ def _split_blocks_from_regions(dsl_text: str, statement_regions) -> tuple[str, .
     return tuple(blocks)
 
 
-class DataStepBlockPreparser:
-    def __init__(self, split_parser_service: SplitStageParserService | None = None) -> None:
-        self._split_parser_service = split_parser_service or SplitStageParserService()
-
-    def split(self, dsl_text: str) -> tuple[str, ...]:
-        if not dsl_text.strip():
-            return ()
-
-        statement_regions = self._split_parser_service.extract_statement_regions(dsl_text)
-        if statement_regions is None:
-            stripped = dsl_text.strip()
-            return (stripped,) if stripped else ()
-        return _split_blocks_from_regions(dsl_text, statement_regions)
+def _extend_statement_end(dsl_text: str, end: int) -> int:
+    cursor = end
+    while cursor < len(dsl_text) and dsl_text[cursor].isspace():
+        cursor += 1
+    if cursor < len(dsl_text) and dsl_text[cursor] == ";":
+        return cursor + 1
+    return end
 
 
 class DataStepBlockSplitter:
-    def __init__(self, parser_service: ParserService | None = None) -> None:
-        self._parser_service = parser_service or ParserService()
-        self._preparser = DataStepBlockPreparser()
+    """Return DATA block source slices from whole-program parse facts.
+
+    Parse failures use established region facts when available, otherwise
+    the stripped source is returned as one block.
+    """
+
+    def __init__(self) -> None:
+        self._program_frontend: Any | None = _new_program_frontend()
 
     def split(self, dsl_text: str) -> tuple[str, ...]:
         if not dsl_text.strip():
             return ()
+        if self._program_frontend is None:
+            stripped = dsl_text.strip()
+            return (stripped,) if stripped else ()
 
-        parser_blocks = self._split_with_parser(dsl_text)
-        if parser_blocks is not None:
-            return parser_blocks
-        return self._split_with_scanner(dsl_text)
+        result = self._parse_program(self._program_frontend, dsl_text)
+        if result is None:
+            # No grammar facts are available; expose the source as one block.
+            stripped = dsl_text.strip()
+            return (stripped,) if stripped else ()
 
-    def _split_with_parser(self, dsl_text: str) -> tuple[str, ...] | None:
-        statement_regions = self._parser_service.extract_statement_regions(dsl_text)
-        if statement_regions is None:
+        if result.program is not None:
+            return project_block_displays(result.program)
+
+        projection = result.projection
+        if (
+            projection is not None
+            and projection.source.text == dsl_text
+            and projection.block_display_spans
+        ):
+            return block_display_slices(
+                dsl_text,
+                [
+                    (span.start, span.end, terminated)
+                    for span, terminated in projection.block_display_spans
+                ],
+                [(region.span.start, region.span.end) for region in projection.skip_regions],
+            )
+        # Region-refusing input: no display region was established — the
+        # one raw source block.
+        stripped = dsl_text.strip()
+        return (stripped,) if stripped else ()
+
+    @staticmethod
+    def _parse_program(frontend: Any, dsl_text: str) -> Any:
+        """One pure parse; ``None`` only for the capability family."""
+
+        try:
+            from .syntax.program import ParserInitializationError
+        except Exception:  # pragma: no cover - lark-free cold import
             return None
-        if not statement_regions:
-            return ()
-        return _split_blocks_from_regions(dsl_text, statement_regions)
-
-    def _split_with_scanner(self, dsl_text: str) -> tuple[str, ...]:
-        return self._preparser.split(dsl_text)
-
-__all__ = ["DataStepBlockPreparser", "DataStepBlockSplitter"]
+        try:
+            return frontend.parse_program(dsl_text)
+        except ParserInitializationError:
+            return None

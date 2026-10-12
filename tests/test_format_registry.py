@@ -5,10 +5,7 @@ import polars as pl
 import pytest
 
 from limulus import Session
-from limulus.backend_integration.backend_dispatch_policy import BackendDispatchPolicy
-from limulus.backend_integration.contracts import RuntimeExecutionContext
 from limulus.format_registry import FormatRegistry
-from limulus.models import ExecuteRequest
 
 
 def test_format_registry_builtin_families_cover_numeric_and_temporal_formats() -> None:
@@ -68,53 +65,29 @@ def test_format_registry_raises_for_invalid_numeric_and_temporal_inputs() -> Non
     assert registry.input("", "yymmdd10") is None
 
 
-def test_session_registry_custom_format_and_informat_apply_to_assign_and_submit() -> None:
-    session = Session(backend="python")
-    session.register_format("tag", lambda value: f"TAG-{value}")
-    session.register_informat("pipeint", lambda value: int(str(value).split("|")[-1]), kind="integer")
-    session.load("src", pa.table({"id": [7], "raw": ["A|12"]}))
+def test_session_registry_rejects_callable_format_and_informat_registration() -> None:
+    session = Session(backend="rust")
 
-    session.assign(
-        "src",
-        out="helper",
-        tag_text="put(id, 'tag')",
-        parsed="input(raw, 'pipeint')",
-    )
-    session.submit(
-        """
-        data dsl;
-        set src;
-        tag_text = put(id, tag.);
-        parsed = input(raw, pipeint.);
-        output dsl;
-        run;
-        """
-    )
+    with pytest.raises(ValueError, match="Callable format registration is not supported"):
+        session.register_format("tag", lambda value: f"TAG-{value}")
+    with pytest.raises(ValueError, match="Callable informat registration is not supported"):
+        session.register_informat("pipeint", lambda value: int(str(value).split("|")[-1]), kind="integer")
 
-    expected = [{"id": 7, "raw": "A|12", "tag_text": "TAG-7", "parsed": 12}]
-    assert session["helper"].to_pylist() == expected
-    assert session["dsl"].to_pylist() == expected
+    assert session._format_registry.has_custom_registrations() is False
 
 
-def test_session_auto_backend_routes_custom_format_and_informat_to_python_facade() -> None:
-    session = Session(backend="auto")
-    session.register_format("tag", lambda value: f"TAG-{value}")
-    session.register_informat("pipeint", lambda value: int(str(value).split("|")[-1]), kind="integer")
-    session.load("src", [{"id": 7, "raw": "A|12"}])
+def test_format_registry_callable_registration_does_not_create_dispatch_hints() -> None:
+    registry = FormatRegistry()
 
-    result = session.submit(
-        """
-        data dsl;
-        set src;
-        tag_text = put(id, tag.);
-        parsed = input(raw, pipeint.);
-        output dsl;
-        run;
-        """
-    )
+    with pytest.raises(ValueError, match="Callable format registration is not supported"):
+        registry.register_format("tag", lambda value: f"TAG-{value}")
+    with pytest.raises(ValueError, match="Callable informat registration is not supported"):
+        registry.register_informat("pipeint", lambda value: int(str(value).split("|")[-1]))
 
-    assert result.success is True
-    assert session["dsl"].to_pylist() == [{"id": 7, "raw": "A|12", "tag_text": "TAG-7", "parsed": 12}]
+    assert registry.dispatch_hints() == {
+        "has_custom_format_registry": False,
+        "has_dict_format_catalogs": False,
+    }
 
 
 def test_format_registry_supports_exact_match_dict_catalogs_and_character_namespace() -> None:
@@ -131,43 +104,15 @@ def test_format_registry_supports_exact_match_dict_catalogs_and_character_namesp
     assert registry.infer_input_kind("pipeint.") == "float64"
 
 
-def test_dict_catalog_dispatch_hints_do_not_force_python_limited_format_routing() -> None:
+def test_dict_catalog_dispatch_hints_are_strategy_neutral() -> None:
     registry = FormatRegistry()
     registry.register_format("tag", {"A": "ALPHA"}, namespace="character")
     registry.register_informat("pipeint", {"A|12": 12.0})
 
-    context = RuntimeExecutionContext(
-        request=ExecuteRequest(
-            dsl_text="data out; set src; text_out = put(code, $tag.); parsed = input(raw, pipeint.); run;",
-            options={"dispatch_hints": registry.dispatch_hints()},
-        ),
-        ast_statements=(
-            type(
-                "Statement",
-                (),
-                {"text": "text_out = put(code, $tag.); parsed = input(raw, pipeint.);"},
-            )(),
-        ),
-        resolved_inputs={},
-        resolved_output_targets=("out",),
-    )
-
-    assert BackendDispatchPolicy.python_limited_reason_codes(context) == ()
-
-    registry.register_format("callable_tag", lambda value: f"TAG-{value}")
-    callable_context = RuntimeExecutionContext(
-        request=ExecuteRequest(
-            dsl_text="data out; set src; text_out = put(code, callable_tag.); run;",
-            options={"dispatch_hints": registry.dispatch_hints()},
-        ),
-        ast_statements=(type("Statement", (), {"text": "text_out = put(code, callable_tag.);"})(),),
-        resolved_inputs={},
-        resolved_output_targets=("out",),
-    )
-
-    assert BackendDispatchPolicy.python_limited_reason_codes(callable_context) == (
-        "PYTHON_LIMITED_FORMAT_REGISTRY",
-    )
+    assert registry.dispatch_hints() == {
+        "has_custom_format_registry": True,
+        "has_dict_format_catalogs": True,
+    }
 
 
 def test_session_rust_backend_supports_dict_custom_formats_and_informats() -> None:
@@ -196,7 +141,7 @@ def test_session_rust_backend_supports_dict_custom_formats_and_informats() -> No
 
 
 def test_session_assign_uses_columnar_mapping_for_dict_catalog_formats(monkeypatch: pytest.MonkeyPatch) -> None:
-    session = Session(backend="python")
+    session = Session(backend="rust")
     session.register_format("tag", {"A": "ALPHA", "B": "BETA"}, namespace="character")
     session.register_informat("pipeint", {"A|12": 12.0, "B|03": 3.0})
     session.load("src", pa.table({"code": ["A", "Z"], "raw": ["A|12", "B|00"]}))

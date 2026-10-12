@@ -1,0 +1,43 @@
+// Dataset-reference WHERE= allowlist grammar.
+//
+// This grammar intentionally describes only a column-to-scalar predicate
+// language.  Function calls, attribute/subscript access, arithmetic, and
+// assignment do not have productions here and therefore fail closed during
+// parsing.
+
+start: or_expr
+
+?or_expr: and_expr (OR and_expr)*     -> or_expression
+?and_expr: not_expr (AND not_expr)*   -> and_expression
+?not_expr: NOT not_expr                -> not_expression
+         | atom
+
+?atom: "(" or_expr ")"               -> grouped_expression
+     | comparison
+     | null_predicate
+
+comparison: COLUMN COMP_OP scalar     -> comparison
+null_predicate: COLUMN IS NOT NULL    -> null_predicate_negated
+              | COLUMN IS NULL        -> null_predicate
+
+?scalar: STRING                       -> string_literal
+        | NUMBER                       -> number_literal
+        | BOOLEAN                      -> boolean_literal
+
+// Explicit keyword terminals have a higher priority than COLUMN so that
+// logical/null words are not accepted as column names in their operator
+// positions.  The regexes are case-insensitive while preserving token text.
+OR.4: /(?ai:or)\b/
+AND.4: /(?ai:and)\b/
+NOT.4: /(?ai:not)\b/
+IS.4: /(?ai:is)\b/
+NULL.4: /(?ai:null)\b/
+BOOLEAN.4: /(?ai:true|false)\b/
+
+COMP_OP.5: ">=" | "<=" | "!=" | "==" | ">" | "<" | "="
+NUMBER.5: /[+-]?(?:(?:\d+\.\d*|\.\d+|\d+)(?:[eE][+-]?\d+)?)/
+STRING.5: /'(?:''|\\.|[^'\\])*'|"(?:""|\\.|[^"\\])*"/
+COLUMN.2: /[A-Za-z_][A-Za-z0-9_]*/
+
+%import common.WS
+%ignore WS

@@ -49,7 +49,6 @@ def test_loader_reads_case_schema_and_dataset_keyed_expected(tmp_path: Path) -> 
     loaded = cases[0]
     assert loaded.case_id == "sample"
     assert loaded.category == "set"
-    assert loaded.backend == "rust"
     assert loaded.extended is False
     assert loaded.inputs["in"] == [{"id": 1}, {"id": 2}]
     assert loaded.expected_datasets["out"].rows == [{"id": 1}, {"id": 2}]
@@ -71,7 +70,6 @@ def test_loader_reads_grouped_layout_variants(tmp_path: Path) -> None:
             "variants": [
                 {
                     "case_id": "numeric_alpha",
-                    "backend": "python",
                     "extended": True,
                     "program": "programs/numeric_alpha.txt",
                     "inputs": {"in": "inputs/alpha.json"},
@@ -79,7 +77,6 @@ def test_loader_reads_grouped_layout_variants(tmp_path: Path) -> None:
                 },
                 {
                     "case_id": "numeric_beta",
-                    "backend": "rust",
                     "program": "programs/numeric_beta.txt",
                     "inputs": {"in": "inputs/beta.json"},
                     "expected": "expected/beta.json",
@@ -104,10 +101,21 @@ def test_loader_reads_grouped_layout_variants(tmp_path: Path) -> None:
 
     assert [case.case_id for case in cases] == ["numeric_alpha", "numeric_beta"]
     assert cases[0].extended is True
-    assert cases[1].backend == "rust"
     assert cases[1].extended is False
     assert cases[0].inputs["in"] == [{"id": 1}]
     assert cases[1].expected_datasets["out"].rows == [{"id": 2}]
+
+
+def test_loader_rejects_backend_matrix_fields(tmp_path: Path) -> None:
+    root = tmp_path / "cases" / "datastep"
+    case_dir = _write_case(root, case_id="backend_matrix")
+
+    manifest = json.loads((case_dir / "case.json").read_text(encoding="utf-8"))
+    manifest["backend"] = "python"
+    (case_dir / "case.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+    with pytest.raises(DataStepCaseLoaderError, match="backend matrix is removed"):
+        load_case_packs(root)
 
 
 def test_loader_rejects_path_traversal_in_manifest(tmp_path: Path) -> None:
