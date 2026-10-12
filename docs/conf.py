@@ -52,6 +52,10 @@ autodoc_default_options = {
     "show-inheritance": True,
 }
 autodoc_mock_imports = [
+    "pyarrow",
+    "pyarrow.compute",
+    "pyarrow.ipc",
+    "pyarrow.parquet",
     "polars",
     "pandas",
     "limulus_native",
